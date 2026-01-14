@@ -1,3 +1,9 @@
+# Configuration (Sensitive Data)
+sector_config.yaml
+config/
+*.yaml
+!docker-compose.yaml
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

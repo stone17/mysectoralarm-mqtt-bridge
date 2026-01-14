@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 import paho.mqtt.client as mqtt_client
 
@@ -21,18 +21,20 @@ logger = logging.getLogger("SectorBridge")
 # --- GLOBAL STATE ---
 sector_api: SectorAlarmAPI = None
 latest_data = {"status": "Unknown", "temps": [], "humidity": []}
-system_state = "STARTING" # STATES: CONNECTED, WAITING_2FA, ERROR, STARTING
+system_state = "STARTING"
 running = True
 
-# --- CONFIG MANAGER (Same as before) ---
+# --- CONFIG MANAGER ---
 class ConfigManager:
     def __init__(self, filepath):
         self.filepath = filepath
+        # Default values
         self.data = {
             "mqtt_broker": os.getenv("MQTT_BROKER", "192.168.0.100"),
             "mqtt_port": int(os.getenv("MQTT_PORT", 1883)),
             "mqtt_prefix": "sector",
             "discovery_prefix": "homeassistant",
+            "poll_interval": 60,
             "email": "",
             "password": "",
             "panel_id": "",
@@ -46,20 +48,28 @@ class ConfigManager:
             try:
                 with open(self.filepath, 'r') as f:
                     loaded = yaml.safe_load(f)
-                    if loaded: self.data.update(loaded)
+                    if loaded: 
+                        # Update defaults with loaded data
+                        self.data.update(loaded)
+                        # Ensure types are correct for critical fields
+                        self.data["poll_interval"] = int(self.data.get("poll_interval", 60))
+                        self.data["mqtt_port"] = int(self.data.get("mqtt_port", 1883))
             except Exception as e:
-                logger.error(f"Config Error: {e}")
+                logger.error(f"Config Load Error: {e}")
 
     def save(self):
         try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
             with open(self.filepath, 'w') as f:
-                yaml.dump(self.data, f)
+                yaml.dump(self.data, f, default_flow_style=False)
+            print(f"DEBUG: Config saved to {self.filepath}: {self.data}")
         except Exception as e:
-            logger.error(f"Save Error: {e}")
+            logger.error(f"Config Save Error: {e}")
 
 cfg = ConfigManager(CONFIG_FILE)
 
-# --- MQTT HANDLER (Same logic, condensed) ---
+# --- MQTT HANDLER ---
 class MqttHandler:
     def __init__(self):
         self.client = mqtt_client.Client()
@@ -68,27 +78,31 @@ class MqttHandler:
 
     def start(self):
         try:
-            self.client.connect(cfg.data['mqtt_broker'], cfg.data['mqtt_port'], 60)
-            self.client.loop_start()
-        except: logger.error("MQTT Connect Failed")
+            broker = cfg.data.get('mqtt_broker')
+            if broker:
+                print(f"DEBUG: MQTT Connecting to {broker}...")
+                self.client.connect(broker, int(cfg.data.get('mqtt_port', 1883)), 60)
+                self.client.loop_start()
+        except Exception as e:
+            logger.error(f"MQTT Connect Failed: {e}")
 
     def stop(self):
-        self.client.loop_stop()
-        self.client.disconnect()
+        try:
+            self.client.loop_stop()
+            self.client.disconnect()
+        except: pass
 
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
+            print("DEBUG: MQTT Connected!")
             base = cfg.data.get("mqtt_prefix", "sector")
             client.subscribe(f"{base}/+/set")
             self.publish_discovery()
+        else:
+            print(f"DEBUG: MQTT Connect Failed code={rc}")
 
     def on_message(self, client, userdata, msg):
-        try:
-            payload = msg.payload.decode().upper()
-            if cfg.data.get("panel_code") and sector_api:
-                mode = {"ARM_AWAY":"Total", "ARM_HOME":"Partial", "DISARM":"Disarm"}.get(payload)
-                if mode: asyncio.run_coroutine_threadsafe(sector_api.arm_system(cfg.data["panel_code"], mode), loop)
-        except: pass
+        pass
 
     def publish_discovery(self):
         p_id = cfg.data.get("panel_id")
@@ -96,7 +110,6 @@ class MqttHandler:
         disc = cfg.data.get("discovery_prefix", "homeassistant")
         base = cfg.data.get("mqtt_prefix", "sector")
         
-        # Alarm Panel
         dev = {"identifiers": [f"sa_{p_id}"], "name": "Sector Alarm", "manufacturer": "Sector Alarm"}
         p = {"name": "Sector Alarm Panel", "unique_id": f"sa_panel_{p_id}", "command_topic": f"{base}/{p_id}/set", "state_topic": f"{base}/{p_id}/state", "device": dev}
         self.client.publish(f"{disc}/alarm_control_panel/sa_{p_id}/config", json.dumps(p), retain=True)
@@ -137,33 +150,30 @@ async def poll_sector():
             await asyncio.sleep(5)
             continue
 
-        # Initialize API if needed
         if not sector_api:
-            sector_api = SectorAlarmAPI(
-                cfg.data["email"], cfg.data["password"], 
-                cfg.data["panel_id"], cfg.data.get("token")
-            )
+            sector_api = SectorAlarmAPI(cfg.data["email"], cfg.data["password"], cfg.data["panel_id"], cfg.data.get("token"))
 
         # LOGIN CHECK
-        if not sector_api.access_token or not await sector_api.validate_token():
-            logger.info("Token invalid or expired. Attempting login...")
-            login_result = await sector_api.login()
-            
-            if login_result == "SUCCESS":
-                system_state = "CONNECTED"
-                # Update token in config so it persists
-                cfg.data["token"] = sector_api.access_token
-                cfg.save()
-            elif login_result == "2FA_REQUIRED":
-                system_state = "WAITING_2FA"
-                logger.warning("2FA Required. Pausing polling until code entered in Web UI.")
+        if system_state != "WAITING_2FA":
+            if not sector_api.access_token or not await sector_api.validate_token():
+                print("DEBUG: Loop needs login...")
+                login_result = await sector_api.login(force=False)
+                
+                if login_result == "SUCCESS":
+                    system_state = "CONNECTED"
+                    cfg.data["token"] = sector_api.access_token
+                    cfg.save()
+                elif login_result == "2FA_REQUIRED":
+                    system_state = "WAITING_2FA"
+                    print("DEBUG: Loop paused. Waiting for 2FA.")
+                else:
+                    system_state = "ERROR"
             else:
-                system_state = "ERROR"
+                system_state = "CONNECTED"
         
-        # POLLING (Only if connected)
+        # FETCH DATA
         if system_state == "CONNECTED":
             try:
-                # 1. Logs/Status
                 logs = await sector_api.get_logs()
                 if logs:
                     last = logs[0].get("EventType", "")
@@ -172,13 +182,10 @@ async def poll_sector():
                     latest_data["status"] = status
                     mqtt_handler.publish_state(status)
 
-                # 2. Temps & Hum
                 temps = await sector_api.get_temperatures() or {}
                 hums = await sector_api.get_humidity() or {}
                 
-                sensors = {} # Map serial -> {name, temp, hum}
-                
-                # Helper to process sensors
+                sensors = {} 
                 def process_s(data, key):
                     for sec in data.get("Sections", []):
                         for p in sec.get("Places", []):
@@ -187,7 +194,6 @@ async def poll_sector():
                                     s, l, v = c["SerialNo"], c["Label"], c[key]
                                     if s not in sensors: sensors[s] = {"name": l, "serial": s}
                                     sensors[s][key.lower()] = v
-                                    # Mqtt Publish immediately
                                     mqtt_handler.publish_sensor(s, l, "temp" if key=="Temperature" else "hum", v)
 
                 process_s(temps, "Temperature")
@@ -196,11 +202,13 @@ async def poll_sector():
                 latest_data["sensors"] = list(sensors.values())
                 latest_data["last_update"] = time.strftime("%H:%M:%S")
             except Exception as e:
-                logger.error(f"Poll Error: {e}")
-                system_state = "ERROR"
+                print(f"DEBUG: Poll Exception: {e}")
+                # Don't set ERROR immediately on one poll fail
 
-        # Wait loop (skip heavy sleep if waiting for 2FA interaction)
-        sleep_time = 60 if system_state == "CONNECTED" else 5
+        # Dynamic Sleep
+        interval = int(cfg.data.get("poll_interval", 60))
+        print(f"DEBUG: Sleeping for {interval}s")
+        sleep_time = interval if system_state == "CONNECTED" else 5
         await asyncio.sleep(sleep_time)
 
 # --- LIFECYCLE ---
@@ -224,47 +232,77 @@ async def home(request: Request):
         "request": request, "config": cfg.data, "data": latest_data, "state": system_state
     })
 
+@app.get("/api/status")
+async def api_status():
+    return JSONResponse({"state": system_state})
+
 @app.post("/trigger_2fa")
 async def trigger_2fa():
-    """Manually triggers the login flow to send SMS."""
-    global system_state
-    if sector_api:
-        res = await sector_api.login() # This triggers the SMS
-        if res == "2FA_REQUIRED" or res == "SUCCESS":
-            system_state = "WAITING_2FA" # Force UI to show input
-            return RedirectResponse("/", status_code=303)
+    global system_state, sector_api
+    print("DEBUG: Manual 2FA Trigger Button Clicked.")
+    
+    if not sector_api:
+        sector_api = SectorAlarmAPI(
+            cfg.data["email"], cfg.data["password"], 
+            cfg.data["panel_id"], cfg.data.get("token")
+        )
+
+    res = await sector_api.login(force=True)
+    print(f"DEBUG: Manual Trigger Result: {res}")
+    
+    if res == "2FA_REQUIRED":
+        system_state = "WAITING_2FA"
+    elif res == "SUCCESS":
+        print("DEBUG: Login succeeded immediately. Connecting...")
+        system_state = "CONNECTED"
+        cfg.data["token"] = sector_api.access_token
+        cfg.save()
+    
     return RedirectResponse("/", status_code=303)
 
 @app.post("/submit_2fa")
 async def submit_2fa(code: str = Form(...)):
-    """Validates the code entered by user."""
     global system_state
+    print(f"DEBUG: Submitting Code {code}")
     if sector_api:
         success = await sector_api.validate_2fa(code)
         if success:
             system_state = "CONNECTED"
             cfg.data["token"] = sector_api.access_token
             cfg.save()
-        else:
-            # Maybe log error or flash message
-            pass
     return RedirectResponse("/", status_code=303)
 
 @app.post("/save_config")
 async def save_config(
     email: str = Form(...), password: str = Form(""), 
     panel_id: str = Form(...), panel_code: str = Form(""),
-    mqtt_broker: str = Form(...), mqtt_port: int = Form(...)
+    mqtt_broker: str = Form(...), mqtt_port: int = Form(...),
+    discovery_prefix: str = Form(...), poll_interval: int = Form(...)
 ):
     global sector_api, system_state
+    
+    # 1. Clear the token because credentials might have changed
+    cfg.data["token"] = "" 
+    
+    # 2. Update Data (Force int for numbers)
     cfg.data.update({
-        "email": email, "password": password, "panel_id": panel_id, 
-        "panel_code": panel_code, "mqtt_broker": mqtt_broker, "mqtt_port": mqtt_port
+        "email": email, 
+        "password": password, 
+        "panel_id": panel_id, 
+        "panel_code": panel_code, 
+        "mqtt_broker": mqtt_broker, 
+        "mqtt_port": int(mqtt_port),
+        "discovery_prefix": discovery_prefix, 
+        "poll_interval": int(poll_interval)
     })
+    
+    # 3. Save
+    print(f"DEBUG: Saving Config -> {cfg.data}")
     cfg.save()
+    
+    # 4. Restart Services
     mqtt_handler.stop(); mqtt_handler.start()
     
-    # Reset API
     if sector_api: await sector_api.close()
     sector_api = None
     system_state = "STARTING"

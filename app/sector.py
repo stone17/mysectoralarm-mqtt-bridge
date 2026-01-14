@@ -23,55 +23,68 @@ class SectorAlarmAPI:
         self.headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json", 
-            "Content-Type": "application/json",
-            "API-Version": "6"
+            "Content-Type": "application/json"
         }
 
     async def ensure_session(self):
         if self.session is None or self.session.closed:
             self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
 
-    async def login(self):
+    async def login(self, force=False):
         """
-        Returns:
-            "SUCCESS": Login OK.
-            "2FA_REQUIRED": Login failed, but triggered 2FA (SMS sent).
-            "FAILED": Wrong password or other error.
+        Args:
+            force (bool): If True, forces a request to the server even if token seems valid.
+        Returns: "SUCCESS", "2FA_REQUIRED", or "FAILED"
         """
+        print(f"DEBUG: Starting Login for {self.email} (Force={force})...")
         await self.ensure_session()
         
-        # If we have a manual token, try to validate it first to avoid re-triggering SMS
-        if self.access_token and await self.validate_token():
-            return "SUCCESS"
+        # 1. Try Token Check First (Skip if forced)
+        if not force and self.access_token:
+            print("DEBUG: Checking existing token before logging in...")
+            if await self.validate_token():
+                print("DEBUG: Existing token is valid. Skipping login.")
+                return "SUCCESS"
+            else:
+                print("DEBUG: Existing token is INVALID.")
 
+        # 2. Perform Login
         url = f"{API_URL}/api/Login/Login"
         payload = {"userId": self.email, "password": self.password}
         
         try:
+            print(f"DEBUG: POST {url}")
             async with async_timeout.timeout(15):
                 async with self.session.post(url, json=payload) as response:
+                    print(f"DEBUG: Login Response Status: {response.status}")
+                    
                     if response.status == 200:
                         data = await response.json()
+                        print("DEBUG: Login 200 OK. Token received.")
                         self._update_headers(data.get("AuthorizationToken"))
                         return "SUCCESS"
+                    
                     elif response.status == 204: 
-                        # 204 No Content often means "Credentials OK, but 2FA required"
-                        _LOGGER.info("Login returned 204. 2FA likely required.")
+                        print("DEBUG: Login 204 No Content. 2FA Triggered (SMS should be sent).")
                         return "2FA_REQUIRED"
+                    
                     elif response.status == 401:
-                        # Sometimes 401 also implies 2FA if creds are technically correct but unauthorized
+                        print("DEBUG: Login 401 Unauthorized. Password wrong or 2FA required.")
                         return "FAILED"
+                    
                     else:
-                        _LOGGER.error(f"Login failed: {response.status}")
+                        text = await response.text()
+                        print(f"DEBUG: Login Failed. Body: {text}")
                         return "FAILED"
+
         except Exception as e:
-            _LOGGER.error(f"Login Error: {e}")
+            print(f"DEBUG: Login Exception: {e}")
             return "FAILED"
 
     async def validate_2fa(self, code):
-        """Submits the SMS code to the API."""
+        print(f"DEBUG: Submitting 2FA Code: {code}")
         await self.ensure_session()
-        # Endpoint can vary, but this is the standard one for the web-app
+        
         url = f"{API_URL}/api/Login/ValidateTwoWayVerificationCode"
         payload = {
             "UserId": self.email, 
@@ -81,19 +94,25 @@ class SectorAlarmAPI:
 
         try:
             async with self.session.post(url, json=payload) as response:
+                print(f"DEBUG: Validate 2FA Status: {response.status}")
                 if response.status == 200:
                     data = await response.json()
                     token = data.get("AuthorizationToken")
                     if token:
+                        print("DEBUG: 2FA Success! Token obtained.")
                         self._update_headers(token)
                         return True
+                else:
+                    text = await response.text()
+                    print(f"DEBUG: 2FA Failed Body: {text}")
         except Exception as e:
-            _LOGGER.error(f"2FA Verify Error: {e}")
+            print(f"DEBUG: 2FA Exception: {e}")
         return False
 
     async def validate_token(self):
         try:
-            return await self.get_panel_status() is not None
+            res = await self.get_panel_status()
+            return res is not None
         except:
             return False
 
@@ -121,7 +140,8 @@ class SectorAlarmAPI:
         try:
             async with self.session.get(url, headers=self.headers) as resp:
                 if resp.status == 200: return await resp.json()
-        except: pass
+                else: print(f"DEBUG: GET {url} failed: {resp.status}")
+        except Exception as e: print(f"DEBUG: GET Error {url}: {e}")
         return None
 
     async def _post(self, url, payload):
@@ -131,7 +151,8 @@ class SectorAlarmAPI:
                 if resp.status in [200, 204]:
                     try: return await resp.json()
                     except: return True
-        except: pass
+                else: print(f"DEBUG: POST {url} failed: {resp.status}")
+        except Exception as e: print(f"DEBUG: POST Error {url}: {e}")
         return None
 
     async def close(self):
