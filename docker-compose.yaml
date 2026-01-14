@@ -1,0 +1,12 @@
+services:
+  sector-bridge:
+    build: .
+    container_name: sector-bridge
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./config:/config
+    environment:
+      - MQTT_BROKER=192.168.0.100  # Change to your Broker IP
+      - MQTT_PORT=1883
+      - CONFIG_PATH=/config/sector_config.yaml
