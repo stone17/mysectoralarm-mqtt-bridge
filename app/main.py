@@ -28,7 +28,6 @@ running = True
 class ConfigManager:
     def __init__(self, filepath):
         self.filepath = filepath
-        # Default values
         self.data = {
             "mqtt_broker": os.getenv("MQTT_BROKER", "192.168.0.100"),
             "mqtt_port": int(os.getenv("MQTT_PORT", 1883)),
@@ -49,9 +48,7 @@ class ConfigManager:
                 with open(self.filepath, 'r') as f:
                     loaded = yaml.safe_load(f)
                     if loaded: 
-                        # Update defaults with loaded data
                         self.data.update(loaded)
-                        # Ensure types are correct for critical fields
                         self.data["poll_interval"] = int(self.data.get("poll_interval", 60))
                         self.data["mqtt_port"] = int(self.data.get("mqtt_port", 1883))
             except Exception as e:
@@ -59,11 +56,10 @@ class ConfigManager:
 
     def save(self):
         try:
-            # Ensure directory exists
             os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
             with open(self.filepath, 'w') as f:
                 yaml.dump(self.data, f, default_flow_style=False)
-            print(f"DEBUG: Config saved to {self.filepath}: {self.data}")
+            print(f"DEBUG: Config saved to {self.filepath}")
         except Exception as e:
             logger.error(f"Config Save Error: {e}")
 
@@ -75,6 +71,7 @@ class MqttHandler:
         self.client = mqtt_client.Client()
         self.client.on_connect = self.on_connect
         self.client.on_message = self.on_message
+        self.discovery_sent = False
 
     def start(self):
         try:
@@ -97,28 +94,58 @@ class MqttHandler:
             print("DEBUG: MQTT Connected!")
             base = cfg.data.get("mqtt_prefix", "sector")
             client.subscribe(f"{base}/+/set")
+            # We try to publish discovery immediately, but if PanelID is missing,
+            # the poll loop will retry it later.
             self.publish_discovery()
         else:
             print(f"DEBUG: MQTT Connect Failed code={rc}")
 
     def on_message(self, client, userdata, msg):
-        pass
+        # Handle commands from HA (e.g., Arm/Disarm)
+        try:
+            payload = msg.payload.decode().upper()
+            print(f"DEBUG: MQTT Command Received: {payload}")
+            # Logic to trigger sector_api.arm_system would go here
+            # using asyncio.run_coroutine_threadsafe to call the async API
+        except: pass
 
     def publish_discovery(self):
         p_id = cfg.data.get("panel_id")
-        if not p_id: return
+        if not p_id: 
+            return # Can't discover without Panel ID
+            
         disc = cfg.data.get("discovery_prefix", "homeassistant")
         base = cfg.data.get("mqtt_prefix", "sector")
         
-        dev = {"identifiers": [f"sa_{p_id}"], "name": "Sector Alarm", "manufacturer": "Sector Alarm"}
-        p = {"name": "Sector Alarm Panel", "unique_id": f"sa_panel_{p_id}", "command_topic": f"{base}/{p_id}/set", "state_topic": f"{base}/{p_id}/state", "device": dev}
+        # --- Alarm Panel Discovery ---
+        dev = {
+            "identifiers": [f"sa_{p_id}"], 
+            "name": "Sector Alarm", 
+            "manufacturer": "Sector Alarm",
+            "model": "Hub"
+        }
+        
+        p = {
+            "name": "Sector Alarm Panel", 
+            "unique_id": f"sa_panel_{p_id}", 
+            "command_topic": f"{base}/{p_id}/set", 
+            "state_topic": f"{base}/{p_id}/state",
+            "code_arm_required": False,
+            "code_disarm_required": False, # We handle code in the bridge config
+            "device": dev
+        }
+        
+        print(f"DEBUG: Sending Alarm Discovery for sa_{p_id}")
         self.client.publish(f"{disc}/alarm_control_panel/sa_{p_id}/config", json.dumps(p), retain=True)
+        self.discovery_sent = True
 
     def publish_sensor(self, serial, name, type_, val):
         disc = cfg.data.get("discovery_prefix", "homeassistant")
         base = cfg.data.get("mqtt_prefix", "sector")
         clean = serial.replace(":", "")
-        dev = {"identifiers": [f"sa_dev_{serial}"], "name": name, "via_device": f"sa_{cfg.data.get('panel_id')}"}
+        p_id = cfg.data.get("panel_id")
+        
+        dev = {"identifiers": [f"sa_dev_{serial}"], "name": name, "via_device": f"sa_{p_id}"}
         
         t_conf = {
             "temp": {"u": "°C", "c": "temperature", "t": "temperature"},
@@ -130,13 +157,22 @@ class MqttHandler:
             "state_topic": f"{base}/sensor/{clean}/state", "unit_of_measurement": t_conf['u'],
             "device_class": t_conf['c'], "value_template": f"{{{{ value_json.{t_conf['t']} }}}}", "device": dev
         }
+        # Publish Config
         self.client.publish(f"{disc}/sensor/sa_{clean}_{type_}/config", json.dumps(p), retain=True)
-        self.client.publish(f"{base}/sensor/{clean}/state", json.dumps({t_conf['t']: val}))
+        # Publish State (RETAINED)
+        self.client.publish(f"{base}/sensor/{clean}/state", json.dumps({t_conf['t']: val}), retain=True)
 
     def publish_state(self, state):
         base = cfg.data.get("mqtt_prefix", "sector")
-        ha_state = {"armed": "armed_away", "partialarmed": "armed_home", "disarmed": "disarmed"}.get(state, "disarmed")
-        self.client.publish(f"{base}/{cfg.data['panel_id']}/state", ha_state)
+        # Map Sector states to HA states
+        # armed = armed_away, partialarmed = armed_home
+        ha_state = "disarmed"
+        if state == "armed": ha_state = "armed_away"
+        elif state == "partialarmed": ha_state = "armed_home"
+        
+        print(f"DEBUG: Publishing Alarm State: {ha_state} (Retained)")
+        # RETAIN=True is critical for HA to see state after restart
+        self.client.publish(f"{base}/{cfg.data['panel_id']}/state", ha_state, retain=True)
 
 mqtt_handler = MqttHandler()
 
@@ -149,6 +185,10 @@ async def poll_sector():
             system_state = "CONFIG_REQUIRED"
             await asyncio.sleep(5)
             continue
+
+        # Retry discovery if it wasn't sent yet (e.g. config was missing on boot)
+        if not mqtt_handler.discovery_sent:
+            mqtt_handler.publish_discovery()
 
         if not sector_api:
             sector_api = SectorAlarmAPI(cfg.data["email"], cfg.data["password"], cfg.data["panel_id"], cfg.data.get("token"))
@@ -163,6 +203,8 @@ async def poll_sector():
                     system_state = "CONNECTED"
                     cfg.data["token"] = sector_api.access_token
                     cfg.save()
+                    # Re-send discovery on fresh login just in case
+                    mqtt_handler.publish_discovery()
                 elif login_result == "2FA_REQUIRED":
                     system_state = "WAITING_2FA"
                     print("DEBUG: Loop paused. Waiting for 2FA.")
@@ -203,11 +245,9 @@ async def poll_sector():
                 latest_data["last_update"] = time.strftime("%H:%M:%S")
             except Exception as e:
                 print(f"DEBUG: Poll Exception: {e}")
-                # Don't set ERROR immediately on one poll fail
 
         # Dynamic Sleep
         interval = int(cfg.data.get("poll_interval", 60))
-        print(f"DEBUG: Sleeping for {interval}s")
         sleep_time = interval if system_state == "CONNECTED" else 5
         await asyncio.sleep(sleep_time)
 
@@ -239,8 +279,6 @@ async def api_status():
 @app.post("/trigger_2fa")
 async def trigger_2fa():
     global system_state, sector_api
-    print("DEBUG: Manual 2FA Trigger Button Clicked.")
-    
     if not sector_api:
         sector_api = SectorAlarmAPI(
             cfg.data["email"], cfg.data["password"], 
@@ -248,12 +286,9 @@ async def trigger_2fa():
         )
 
     res = await sector_api.login(force=True)
-    print(f"DEBUG: Manual Trigger Result: {res}")
-    
     if res == "2FA_REQUIRED":
         system_state = "WAITING_2FA"
     elif res == "SUCCESS":
-        print("DEBUG: Login succeeded immediately. Connecting...")
         system_state = "CONNECTED"
         cfg.data["token"] = sector_api.access_token
         cfg.save()
@@ -263,13 +298,13 @@ async def trigger_2fa():
 @app.post("/submit_2fa")
 async def submit_2fa(code: str = Form(...)):
     global system_state
-    print(f"DEBUG: Submitting Code {code}")
     if sector_api:
         success = await sector_api.validate_2fa(code)
         if success:
             system_state = "CONNECTED"
             cfg.data["token"] = sector_api.access_token
             cfg.save()
+            mqtt_handler.publish_discovery() # Refresh discovery on new login
     return RedirectResponse("/", status_code=303)
 
 @app.post("/save_config")
@@ -281,28 +316,15 @@ async def save_config(
 ):
     global sector_api, system_state
     
-    # 1. Clear the token because credentials might have changed
     cfg.data["token"] = "" 
-    
-    # 2. Update Data (Force int for numbers)
     cfg.data.update({
-        "email": email, 
-        "password": password, 
-        "panel_id": panel_id, 
-        "panel_code": panel_code, 
-        "mqtt_broker": mqtt_broker, 
-        "mqtt_port": int(mqtt_port),
-        "discovery_prefix": discovery_prefix, 
-        "poll_interval": int(poll_interval)
+        "email": email, "password": password, "panel_id": panel_id, 
+        "panel_code": panel_code, "mqtt_broker": mqtt_broker, "mqtt_port": int(mqtt_port),
+        "discovery_prefix": discovery_prefix, "poll_interval": int(poll_interval)
     })
-    
-    # 3. Save
-    print(f"DEBUG: Saving Config -> {cfg.data}")
     cfg.save()
     
-    # 4. Restart Services
     mqtt_handler.stop(); mqtt_handler.start()
-    
     if sector_api: await sector_api.close()
     sector_api = None
     system_state = "STARTING"
