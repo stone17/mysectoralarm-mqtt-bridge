@@ -6,8 +6,8 @@ import yaml
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, Form, BackgroundTasks
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 import paho.mqtt.client as mqtt_client
 
@@ -21,9 +21,10 @@ logger = logging.getLogger("SectorBridge")
 # --- GLOBAL STATE ---
 sector_api: SectorAlarmAPI = None
 latest_data = {"status": "Unknown", "temps": [], "humidity": []}
+system_state = "STARTING" # STATES: CONNECTED, WAITING_2FA, ERROR, STARTING
 running = True
 
-# --- CONFIG MANAGER ---
+# --- CONFIG MANAGER (Same as before) ---
 class ConfigManager:
     def __init__(self, filepath):
         self.filepath = filepath
@@ -35,8 +36,8 @@ class ConfigManager:
             "email": "",
             "password": "",
             "panel_id": "",
-            "panel_code": "", # For arming/disarming
-            "token": "" # Manual token for 2FA bypass
+            "panel_code": "",
+            "token": ""
         }
         self.load()
 
@@ -58,7 +59,7 @@ class ConfigManager:
 
 cfg = ConfigManager(CONFIG_FILE)
 
-# --- MQTT HANDLER ---
+# --- MQTT HANDLER (Same logic, condensed) ---
 class MqttHandler:
     def __init__(self):
         self.client = mqtt_client.Client()
@@ -67,13 +68,9 @@ class MqttHandler:
 
     def start(self):
         try:
-            broker = cfg.data['mqtt_broker']
-            port = cfg.data['mqtt_port']
-            logger.info(f"Connecting to MQTT {broker}:{port}")
-            self.client.connect(broker, port, 60)
+            self.client.connect(cfg.data['mqtt_broker'], cfg.data['mqtt_port'], 60)
             self.client.loop_start()
-        except Exception as e:
-            logger.error(f"MQTT Start Error: {e}")
+        except: logger.error("MQTT Connect Failed")
 
     def stop(self):
         self.client.loop_stop()
@@ -82,174 +79,129 @@ class MqttHandler:
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             base = cfg.data.get("mqtt_prefix", "sector")
-            logger.info(f"MQTT Connected. Listening on {base}/+/set")
-            self.client.subscribe(f"{base}/+/set")
+            client.subscribe(f"{base}/+/set")
             self.publish_discovery()
 
     def on_message(self, client, userdata, msg):
-        # Handle Arm/Disarm commands via MQTT
-        # Topic: sector/{panel_id}/set Payload: ARM_HOME, ARM_AWAY, DISARM
         try:
             payload = msg.payload.decode().upper()
-            logger.info(f"Received MQTT Command: {payload}")
-            # Logic to call sector_api.arm_system would go here
-            # For security, ensure 'panel_code' is set in config
-            if cfg.data.get("panel_code"):
-                mode = None
-                if payload == "ARM_AWAY": mode = "Total"
-                elif payload == "ARM_HOME": mode = "Partial"
-                elif payload == "DISARM": mode = "Disarm"
-                
-                if mode and sector_api:
-                    asyncio.run_coroutine_threadsafe(sector_api.arm_system(cfg.data["panel_code"], mode), loop)
-        except Exception as e:
-            logger.error(f"MQTT Msg Error: {e}")
+            if cfg.data.get("panel_code") and sector_api:
+                mode = {"ARM_AWAY":"Total", "ARM_HOME":"Partial", "DISARM":"Disarm"}.get(payload)
+                if mode: asyncio.run_coroutine_threadsafe(sector_api.arm_system(cfg.data["panel_code"], mode), loop)
+        except: pass
 
     def publish_discovery(self):
         p_id = cfg.data.get("panel_id")
         if not p_id: return
-        
         disc = cfg.data.get("discovery_prefix", "homeassistant")
         base = cfg.data.get("mqtt_prefix", "sector")
         
-        # 1. Alarm Control Panel
-        dev_info = {"identifiers": [f"sa_{p_id}"], "name": "Sector Alarm", "manufacturer": "Sector Alarm"}
-        payload_alarm = {
-            "name": "Sector Alarm Panel",
-            "unique_id": f"sa_panel_{p_id}",
-            "command_topic": f"{base}/{p_id}/set",
-            "state_topic": f"{base}/{p_id}/state",
-            "device": dev_info
+        # Alarm Panel
+        dev = {"identifiers": [f"sa_{p_id}"], "name": "Sector Alarm", "manufacturer": "Sector Alarm"}
+        p = {"name": "Sector Alarm Panel", "unique_id": f"sa_panel_{p_id}", "command_topic": f"{base}/{p_id}/set", "state_topic": f"{base}/{p_id}/state", "device": dev}
+        self.client.publish(f"{disc}/alarm_control_panel/sa_{p_id}/config", json.dumps(p), retain=True)
+
+    def publish_sensor(self, serial, name, type_, val):
+        disc = cfg.data.get("discovery_prefix", "homeassistant")
+        base = cfg.data.get("mqtt_prefix", "sector")
+        clean = serial.replace(":", "")
+        dev = {"identifiers": [f"sa_dev_{serial}"], "name": name, "via_device": f"sa_{cfg.data.get('panel_id')}"}
+        
+        t_conf = {
+            "temp": {"u": "°C", "c": "temperature", "t": "temperature"},
+            "hum": {"u": "%", "c": "humidity", "t": "humidity"}
+        }[type_]
+        
+        p = {
+            "name": f"{name} {type_.title()}", "unique_id": f"sa_{clean}_{type_}",
+            "state_topic": f"{base}/sensor/{clean}/state", "unit_of_measurement": t_conf['u'],
+            "device_class": t_conf['c'], "value_template": f"{{{{ value_json.{t_conf['t']} }}}}", "device": dev
         }
-        self.client.publish(f"{disc}/alarm_control_panel/sa_{p_id}/config", json.dumps(payload_alarm), retain=True)
+        self.client.publish(f"{disc}/sensor/sa_{clean}_{type_}/config", json.dumps(p), retain=True)
+        self.client.publish(f"{base}/sensor/{clean}/state", json.dumps({t_conf['t']: val}))
 
-    def publish_sensor_discovery(self, sensor_serial, name, type_):
-        # Dynamic discovery for sensors found during polling
-        disc = cfg.data.get("discovery_prefix", "homeassistant")
+    def publish_state(self, state):
         base = cfg.data.get("mqtt_prefix", "sector")
-        p_id = cfg.data.get("panel_id")
-        
-        dev_info = {"identifiers": [f"sa_dev_{sensor_serial}"], "name": name, "via_device": f"sa_{p_id}"}
-        
-        clean_serial = sensor_serial.replace(":", "")
-
-        if type_ == "temp":
-            payload = {
-                "name": f"{name} Temperature",
-                "unique_id": f"sa_{clean_serial}_temp",
-                "state_topic": f"{base}/sensor/{clean_serial}/state",
-                "unit_of_measurement": "°C",
-                "device_class": "temperature",
-                "value_template": "{{ value_json.temperature }}",
-                "device": dev_info
-            }
-            self.client.publish(f"{disc}/sensor/sa_{clean_serial}_temp/config", json.dumps(payload), retain=True)
-
-        elif type_ == "hum":
-            payload = {
-                "name": f"{name} Humidity",
-                "unique_id": f"sa_{clean_serial}_hum",
-                "state_topic": f"{base}/sensor/{clean_serial}/state",
-                "unit_of_measurement": "%",
-                "device_class": "humidity",
-                "value_template": "{{ value_json.humidity }}",
-                "device": dev_info
-            }
-            self.client.publish(f"{disc}/sensor/sa_{clean_serial}_hum/config", json.dumps(payload), retain=True)
-
-
-    def publish_state(self, p_id, state):
-        base = cfg.data.get("mqtt_prefix", "sector")
-        # Map Sector states to HA states
-        # armed, disarmed, partialarmed
-        ha_state = "disarmed"
-        if state == "armed": ha_state = "armed_away"
-        elif state == "partialarmed": ha_state = "armed_home"
-        
-        self.client.publish(f"{base}/{p_id}/state", ha_state)
-
-    def publish_sensor_data(self, serial, data):
-        base = cfg.data.get("mqtt_prefix", "sector")
-        clean_serial = serial.replace(":", "")
-        self.client.publish(f"{base}/sensor/{clean_serial}/state", json.dumps(data))
+        ha_state = {"armed": "armed_away", "partialarmed": "armed_home", "disarmed": "disarmed"}.get(state, "disarmed")
+        self.client.publish(f"{base}/{cfg.data['panel_id']}/state", ha_state)
 
 mqtt_handler = MqttHandler()
 
 # --- BACKGROUND POLLING ---
 async def poll_sector():
-    global sector_api, latest_data
+    global sector_api, latest_data, system_state
+    
     while running:
-        if cfg.data.get("email") and cfg.data.get("panel_id"):
-            if not sector_api:
-                sector_api = SectorAlarmAPI(
-                    cfg.data["email"], cfg.data["password"], 
-                    cfg.data["panel_id"], cfg.data.get("token")
-                )
-                if not await sector_api.login():
-                    logger.error("Login failed. Check credentials or 2FA.")
+        if not cfg.data.get("email") or not cfg.data.get("panel_id"):
+            system_state = "CONFIG_REQUIRED"
+            await asyncio.sleep(5)
+            continue
+
+        # Initialize API if needed
+        if not sector_api:
+            sector_api = SectorAlarmAPI(
+                cfg.data["email"], cfg.data["password"], 
+                cfg.data["panel_id"], cfg.data.get("token")
+            )
+
+        # LOGIN CHECK
+        if not sector_api.access_token or not await sector_api.validate_token():
+            logger.info("Token invalid or expired. Attempting login...")
+            login_result = await sector_api.login()
             
+            if login_result == "SUCCESS":
+                system_state = "CONNECTED"
+                # Update token in config so it persists
+                cfg.data["token"] = sector_api.access_token
+                cfg.save()
+            elif login_result == "2FA_REQUIRED":
+                system_state = "WAITING_2FA"
+                logger.warning("2FA Required. Pausing polling until code entered in Web UI.")
+            else:
+                system_state = "ERROR"
+        
+        # POLLING (Only if connected)
+        if system_state == "CONNECTED":
             try:
-                # 1. Get Logs for Alarm Status
+                # 1. Logs/Status
                 logs = await sector_api.get_logs()
-                if logs and len(logs) > 0:
-                    last_event = logs[0].get("EventType", "")
-                    status = "disarmed"
-                    if "armed" in last_event and "partial" not in last_event: status = "armed"
-                    elif "partial" in last_event: status = "partialarmed"
-                    elif "disarmed" in last_event: status = "disarmed"
-                    
+                if logs:
+                    last = logs[0].get("EventType", "")
+                    status = "armed" if "armed" in last and "disarmed" not in last else "disarmed"
+                    if "partial" in last: status = "partialarmed"
                     latest_data["status"] = status
-                    mqtt_handler.publish_state(cfg.data["panel_id"], status)
+                    mqtt_handler.publish_state(status)
 
-                # 2. Get Temperatures
-                temps = await sector_api.get_temperatures()
-                temp_map = {}
-                if temps:
-                    for section in temps.get("Sections", []):
-                        for place in section.get("Places", []):
-                            for comp in place.get("Components", []):
-                                if "Temperature" in comp:
-                                    serial = comp["SerialNo"]
-                                    val = comp["Temperature"]
-                                    label = comp["Label"]
-                                    temp_map[serial] = {"val": val, "label": label}
-                                    mqtt_handler.publish_sensor_discovery(serial, label, "temp")
-
-                # 3. Get Humidity
-                hums = await sector_api.get_humidity()
-                hum_map = {}
-                if hums:
-                    for section in hums.get("Sections", []):
-                        for place in section.get("Places", []):
-                            for comp in place.get("Components", []):
-                                if "Humidity" in comp:
-                                    serial = comp["SerialNo"]
-                                    val = comp["Humidity"]
-                                    label = comp["Label"]
-                                    hum_map[serial] = {"val": val, "label": label}
-                                    mqtt_handler.publish_sensor_discovery(serial, label, "hum")
-
-                # Merge and Publish
-                all_serials = set(temp_map.keys()) | set(hum_map.keys())
-                combined_list = []
-                for s in all_serials:
-                    name = temp_map.get(s, {}).get("label") or hum_map.get(s, {}).get("label") or "Unknown"
-                    payload = {}
-                    if s in temp_map: payload["temperature"] = float(temp_map[s]["val"])
-                    if s in hum_map: payload["humidity"] = int(hum_map[s]["val"])
-                    
-                    mqtt_handler.publish_sensor_data(s, payload)
-                    
-                    combined_list.append({"name": name, "serial": s, **payload})
+                # 2. Temps & Hum
+                temps = await sector_api.get_temperatures() or {}
+                hums = await sector_api.get_humidity() or {}
                 
-                latest_data["sensors"] = combined_list
+                sensors = {} # Map serial -> {name, temp, hum}
+                
+                # Helper to process sensors
+                def process_s(data, key):
+                    for sec in data.get("Sections", []):
+                        for p in sec.get("Places", []):
+                            for c in p.get("Components", []):
+                                if key in c:
+                                    s, l, v = c["SerialNo"], c["Label"], c[key]
+                                    if s not in sensors: sensors[s] = {"name": l, "serial": s}
+                                    sensors[s][key.lower()] = v
+                                    # Mqtt Publish immediately
+                                    mqtt_handler.publish_sensor(s, l, "temp" if key=="Temperature" else "hum", v)
+
+                process_s(temps, "Temperature")
+                process_s(hums, "Humidity")
+                
+                latest_data["sensors"] = list(sensors.values())
                 latest_data["last_update"] = time.strftime("%H:%M:%S")
-
             except Exception as e:
-                logger.error(f"Polling Error: {e}")
-                sector_api = None # Force re-login next time
+                logger.error(f"Poll Error: {e}")
+                system_state = "ERROR"
 
-        await asyncio.sleep(60)
+        # Wait loop (skip heavy sleep if waiting for 2FA interaction)
+        sleep_time = 60 if system_state == "CONNECTED" else 5
+        await asyncio.sleep(sleep_time)
 
 # --- LIFECYCLE ---
 @asynccontextmanager
@@ -269,30 +221,52 @@ templates = Jinja2Templates(directory="app/templates")
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     return templates.TemplateResponse("index.html", {
-        "request": request, 
-        "config": cfg.data,
-        "data": latest_data
+        "request": request, "config": cfg.data, "data": latest_data, "state": system_state
     })
+
+@app.post("/trigger_2fa")
+async def trigger_2fa():
+    """Manually triggers the login flow to send SMS."""
+    global system_state
+    if sector_api:
+        res = await sector_api.login() # This triggers the SMS
+        if res == "2FA_REQUIRED" or res == "SUCCESS":
+            system_state = "WAITING_2FA" # Force UI to show input
+            return RedirectResponse("/", status_code=303)
+    return RedirectResponse("/", status_code=303)
+
+@app.post("/submit_2fa")
+async def submit_2fa(code: str = Form(...)):
+    """Validates the code entered by user."""
+    global system_state
+    if sector_api:
+        success = await sector_api.validate_2fa(code)
+        if success:
+            system_state = "CONNECTED"
+            cfg.data["token"] = sector_api.access_token
+            cfg.save()
+        else:
+            # Maybe log error or flash message
+            pass
+    return RedirectResponse("/", status_code=303)
 
 @app.post("/save_config")
 async def save_config(
     email: str = Form(...), password: str = Form(""), 
     panel_id: str = Form(...), panel_code: str = Form(""),
-    token: str = Form(""),
     mqtt_broker: str = Form(...), mqtt_port: int = Form(...)
 ):
-    global sector_api
+    global sector_api, system_state
     cfg.data.update({
         "email": email, "password": password, "panel_id": panel_id, 
-        "panel_code": panel_code, "token": token,
-        "mqtt_broker": mqtt_broker, "mqtt_port": mqtt_port
+        "panel_code": panel_code, "mqtt_broker": mqtt_broker, "mqtt_port": mqtt_port
     })
     cfg.save()
+    mqtt_handler.stop(); mqtt_handler.start()
     
-    # Restart MQTT and API
-    mqtt_handler.stop()
-    mqtt_handler.start()
+    # Reset API
     if sector_api: await sector_api.close()
-    sector_api = None # Forces re-login in poll loop
+    sector_api = None
+    system_state = "STARTING"
     
     return RedirectResponse(url="/", status_code=303)
