@@ -97,6 +97,8 @@
                                 <h6 class="text-primary">MQTT Configuration</h6>
                                 <div class="mb-2"><label>Broker IP</label><input type="text" name="mqtt_broker" class="form-control" value="{{ config.mqtt_broker }}" required></div>
                                 <div class="mb-2"><label>Port</label><input type="number" name="mqtt_port" class="form-control" value="{{ config.mqtt_port }}" required></div>
+                                <div class="mb-2"><label>Username</label><input type="text" name="mqtt_username" class="form-control" value="{{ config.mqtt_username }}"></div>
+                                <div class="mb-2"><label>Password</label><input type="password" name="mqtt_password" class="form-control" value="{{ config.mqtt_password }}"></div>
                                 <div class="mb-2"><label>Auto-Discovery Prefix</label><input type="text" name="discovery_prefix" class="form-control" value="{{ config.discovery_prefix }}" required></div>
                             </div>
                             <div class="col-md-6">

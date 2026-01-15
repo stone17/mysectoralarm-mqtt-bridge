@@ -31,6 +31,8 @@ class ConfigManager:
         self.data = {
             "mqtt_broker": os.getenv("MQTT_BROKER", "192.168.0.100"),
             "mqtt_port": int(os.getenv("MQTT_PORT", 1883)),
+            "mqtt_username": os.getenv("MQTT_USERNAME", ""),
+            "mqtt_password": os.getenv("MQTT_PASSWORD", ""),
             "mqtt_prefix": "sector",
             "discovery_prefix": "homeassistant",
             "poll_interval": 60,
@@ -79,6 +81,13 @@ class MqttHandler:
             broker = cfg.data.get('mqtt_broker')
             if broker:
                 print(f"DEBUG: MQTT Connecting to {broker}...")
+                
+                # Set Username/Password if configured
+                user = cfg.data.get('mqtt_username')
+                pwd = cfg.data.get('mqtt_password')
+                if user and pwd:
+                    self.client.username_pw_set(user, pwd)
+
                 self.client.connect(broker, int(cfg.data.get('mqtt_port', 1883)), 60)
                 # Set Last Will (Availability)
                 base = cfg.data.get("mqtt_prefix", "sector")
@@ -353,6 +362,7 @@ async def save_config(
     email: str = Form(...), password: str = Form(""), 
     panel_id: str = Form(...), panel_code: str = Form(""),
     mqtt_broker: str = Form(...), mqtt_port: int = Form(...),
+    mqtt_username: str = Form(""), mqtt_password: str = Form(""),
     discovery_prefix: str = Form(...), poll_interval: int = Form(...)
 ):
     global sector_api, system_state
@@ -361,6 +371,7 @@ async def save_config(
     cfg.data.update({
         "email": email, "password": password, "panel_id": str(panel_id), 
         "panel_code": panel_code, "mqtt_broker": mqtt_broker, "mqtt_port": int(mqtt_port),
+        "mqtt_username": mqtt_username, "mqtt_password": mqtt_password,
         "discovery_prefix": discovery_prefix, "poll_interval": int(poll_interval)
     })
     cfg.save()
