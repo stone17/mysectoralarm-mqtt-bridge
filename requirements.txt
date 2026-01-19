@@ -6,3 +6,4 @@ aiohttp
 paho-mqtt
 pyyaml
 async-timeout
+cryptography

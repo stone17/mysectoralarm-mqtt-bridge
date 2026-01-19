@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 import paho.mqtt.client as mqtt_client
 
 from app.sector import SectorAlarmAPI
+from app import security
 
 # --- CONFIG & LOGGING ---
 CONFIG_FILE = os.getenv("CONFIG_PATH", "app/sector_config.yaml")
@@ -24,7 +25,6 @@ latest_data = {"status": "Unknown", "temps": [], "humidity": []}
 system_state = "STARTING"
 running = True
 
-# --- CONFIG MANAGER ---
 class ConfigManager:
     def __init__(self, filepath):
         self.filepath = filepath
@@ -43,26 +43,65 @@ class ConfigManager:
             "token": ""
         }
         self.load()
+        # Save immediately to ensure file exists and passwords get encrypted if they were defaults/env vars
+        self.save()
 
     def load(self):
         if os.path.exists(self.filepath):
             try:
                 with open(self.filepath, 'r') as f:
-                    loaded = yaml.safe_load(f)
-                    if loaded: 
-                        self.data.update(loaded)
-                        self.data["poll_interval"] = int(self.data.get("poll_interval", 60))
-                        self.data["mqtt_port"] = int(self.data.get("mqtt_port", 1883))
-                        if "panel_id" in self.data:
-                            self.data["panel_id"] = str(self.data["panel_id"])
+                    file_data = yaml.safe_load(f) or {}
+
+                # Fields that require decryption
+                sensitive_fields = ["mqtt_password", "password", "panel_code"]
+                
+                # Merge non-sensitive fields directly
+                for k, v in file_data.items():
+                    if k not in sensitive_fields:
+                        self.data[k] = v
+                
+                # Handle Passwords: Try decrypt, fallback to plain (migration support)
+                for field in sensitive_fields:
+                    raw_val = file_data.get(field)
+                    if raw_val:
+                        decrypted = security.decrypt_password(raw_val)
+                        if decrypted:
+                            self.data[field] = decrypted
+                        else:
+                            # If decrypt fails, assume it's plain text (user edited file manually)
+                            self.data[field] = raw_val
+
+                # Type conversions
+                self.data["poll_interval"] = int(self.data.get("poll_interval", 60))
+                self.data["mqtt_port"] = int(self.data.get("mqtt_port", 1883))
+                if "panel_id" in self.data:
+                    self.data["panel_id"] = str(self.data["panel_id"])
+                            
             except Exception as e:
                 logger.error(f"Config Load Error: {e}")
 
     def save(self):
         try:
             os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
+            
+            # Create a copy to modify for storage without affecting running app
+            storage_data = self.data.copy()
+            
+            # Encrypt sensitive fields before writing to disk
+            sensitive_fields = ["mqtt_password", "password", "panel_code"]
+            
+            for field in sensitive_fields:
+                plain = storage_data.get(field)
+                if plain:
+                    encrypted = security.encrypt_password(plain)
+                    if encrypted:
+                        storage_data[field] = encrypted
+                    else:
+                        logger.error(f"Failed to encrypt {field}, not saving it to avoid leak.")
+                        del storage_data[field]
+
             with open(self.filepath, 'w') as f:
-                yaml.dump(self.data, f, default_flow_style=False)
+                yaml.dump(storage_data, f, default_flow_style=False)
             print(f"DEBUG: Config saved to {self.filepath}")
         except Exception as e:
             logger.error(f"Config Save Error: {e}")
