@@ -357,9 +357,13 @@ templates = Jinja2Templates(directory="app/templates")
 # --- ROUTES ---
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {
-        "request": request, "config": cfg.data, "data": latest_data, "state": system_state
-    })
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "request": request, "config": cfg.data, "data": latest_data, "state": system_state
+        }
+    )
 
 @app.get("/api/status")
 async def api_status():
