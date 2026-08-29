@@ -121,10 +121,16 @@ class SectorAlarmAPI:
         return await self._get(f"{API_URL}/api/panel/GetPanelStatus?panelId={self.panel_id}")
 
     async def get_temperatures(self):
-        return await self._post(f"{API_URL}/api/v2/housecheck/temperatures", {"PanelId": self.panel_id})
+        res = await self._post(f"{API_URL}/api/v2/housecheck/temperatures", {"PanelId": self.panel_id})
+        if not res:
+            res = await self._get(f"{API_URL}/api/panel/GetTemperatures?panelId={self.panel_id}")
+        return res
 
     async def get_humidity(self):
-        return await self._get(f"{API_URL}/api/housecheck/panels/{self.panel_id}/humidity")
+        res = await self._get(f"{API_URL}/api/housecheck/panels/{self.panel_id}/humidity")
+        if not res:
+            res = await self._get(f"{API_URL}/api/panel/GetHumidity?panelId={self.panel_id}")
+        return res
 
     async def get_logs(self):
         return await self._get(f"{API_URL}/api/panel/GetLogs?panelId={self.panel_id}")

@@ -65,12 +65,14 @@
                 <div class="card-body text-center">
                     <h5 class="card-title text-truncate">{{ sensor.name }}</h5>
                     <div class="row mt-3">
+                        {% if 'temperature' in sensor and sensor.temperature is not none %}
                         <div class="col">
                             <h3 class="text-primary">{{ sensor.temperature }}°C</h3>
                             <small class="text-muted">Temp</small>
                         </div>
-                        {% if sensor.humidity %}
-                        <div class="col border-start">
+                        {% endif %}
+                        {% if 'humidity' in sensor and sensor.humidity is not none %}
+                        <div class="col {% if 'temperature' in sensor and sensor.temperature is not none %}border-start{% endif %}">
                             <h3 class="text-info">{{ sensor.humidity }}%</h3>
                             <small class="text-muted">Hum</small>
                         </div>
@@ -127,6 +129,7 @@
     <script>
         // Auto-Refresh Logic
         let currentState = "{{ state }}";
+        let lastUpdate = "{{ data.last_update if data else '' }}";
         
         setInterval(async () => {
             try {
@@ -146,8 +149,15 @@
                 if (currentState !== 'WAITING_2FA' && data.state === 'WAITING_2FA') {
                     window.location.reload();
                 }
+                
+                if (data.last_update && lastUpdate !== data.last_update) {
+                    window.location.reload();
+                }
 
                 currentState = data.state;
+                if (data.last_update) {
+                    lastUpdate = data.last_update;
+                }
                 
                 // Update badge text
                 const badge = document.getElementById('state-badge');

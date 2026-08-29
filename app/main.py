@@ -313,20 +313,38 @@ async def poll_sector():
                     
                     mqtt_handler.publish_discovery() # Ensure discovery is fresh
                     mqtt_handler.publish_state(status)
+            except Exception as e:
+                print(f"DEBUG: Logs Poll Exception: {e}")
 
+            try:
                 temps = await sector_api.get_temperatures() or {}
                 hums = await sector_api.get_humidity() or {}
                 
                 sensors = {} 
                 def process_s(data, key):
-                    for sec in data.get("Sections", []):
-                        for p in sec.get("Places", []):
-                            for c in p.get("Components", []):
-                                if key in c:
-                                    s, l, v = c["SerialNo"], c["Label"], c[key]
-                                    if s not in sensors: sensors[s] = {"name": l, "serial": s}
-                                    sensors[s][key.lower()] = v
-                                    mqtt_handler.publish_sensor(s, l, "temp" if key=="Temperature" else "hum", v)
+                    if not data: return
+                    components = []
+                    if isinstance(data, list):
+                        components = data
+                    elif isinstance(data, dict):
+                        for sec in data.get("Sections", []):
+                            if isinstance(sec, dict):
+                                for p in sec.get("Places", []):
+                                    if isinstance(p, dict):
+                                        components.extend(p.get("Components", []))
+                        for fallback_key in ["Temperatures", "Humidity", "Components", "components"]:
+                            if fallback_key in data and isinstance(data[fallback_key], list):
+                                components.extend(data[fallback_key])
+                    
+                    for c in components:
+                        if isinstance(c, dict) and key in c:
+                            s = c.get("SerialNo") or c.get("Id") or ""
+                            l = c.get("Label", "Unknown")
+                            v = c[key]
+                            if not s: continue
+                            if s not in sensors: sensors[s] = {"name": l, "serial": s}
+                            sensors[s][key.lower()] = v
+                            mqtt_handler.publish_sensor(s, l, "temp" if key=="Temperature" else "hum", v)
 
                 process_s(temps, "Temperature")
                 process_s(hums, "Humidity")
@@ -334,7 +352,7 @@ async def poll_sector():
                 latest_data["sensors"] = list(sensors.values())
                 latest_data["last_update"] = time.strftime("%H:%M:%S")
             except Exception as e:
-                print(f"DEBUG: Poll Exception: {e}")
+                print(f"DEBUG: Sensors Poll Exception: {e}")
 
         interval = int(cfg.data.get("poll_interval", 60))
         sleep_time = interval if system_state == "CONNECTED" else 5
@@ -367,7 +385,7 @@ async def home(request: Request):
 
 @app.get("/api/status")
 async def api_status():
-    return JSONResponse({"state": system_state})
+    return JSONResponse({"state": system_state, "last_update": latest_data.get("last_update")})
 
 @app.post("/trigger_2fa")
 async def trigger_2fa():
