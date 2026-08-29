@@ -308,10 +308,11 @@ async def poll_sector():
                 
                 # --- DEBUG DUMP ---
                 try:
-                    with open("debug_data.json", "w") as f:
+                    config_dir = os.path.dirname(cfg.filepath)
+                    with open(os.path.join(config_dir, "debug_data.json"), "w") as f:
                         json.dump({"logs": logs}, f)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"DEBUG Dump Error: {e}")
                 # ------------------
                 
                 if logs:
@@ -331,10 +332,11 @@ async def poll_sector():
                 
                 # --- DEBUG DUMP ---
                 try:
-                    with open("debug_data.json", "w") as f:
-                        json.dump({"logs": logs, "temps": temps, "hums": hums}, f, indent=2)
-                except Exception:
-                    pass
+                    config_dir = os.path.dirname(cfg.filepath)
+                    with open(os.path.join(config_dir, "debug_sensors.json"), "w") as f:
+                        json.dump({"temps": temps, "hums": hums}, f, indent=2)
+                except Exception as e:
+                    print(f"DEBUG Dump Error: {e}")
                 # ------------------
                 
                 sensors = {} 
