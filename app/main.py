@@ -305,6 +305,15 @@ async def poll_sector():
         if system_state == "CONNECTED":
             try:
                 logs = await sector_api.get_logs()
+                
+                # --- DEBUG DUMP ---
+                try:
+                    with open("debug_data.json", "w") as f:
+                        json.dump({"logs": logs}, f)
+                except Exception:
+                    pass
+                # ------------------
+                
                 if logs:
                     last = logs[0].get("EventType", "")
                     status = "armed" if "armed" in last and "disarmed" not in last else "disarmed"
@@ -319,6 +328,14 @@ async def poll_sector():
             try:
                 temps = await sector_api.get_temperatures() or {}
                 hums = await sector_api.get_humidity() or {}
+                
+                # --- DEBUG DUMP ---
+                try:
+                    with open("debug_data.json", "w") as f:
+                        json.dump({"logs": logs, "temps": temps, "hums": hums}, f, indent=2)
+                except Exception:
+                    pass
+                # ------------------
                 
                 sensors = {} 
                 def process_s(data, key):
@@ -386,6 +403,25 @@ async def home(request: Request):
 @app.get("/api/status")
 async def api_status():
     return JSONResponse({"state": system_state, "last_update": latest_data.get("last_update")})
+
+@app.get("/api/debug_raw")
+async def api_debug_raw():
+    global sector_api
+    if not sector_api:
+        return JSONResponse({"error": "Not logged in"})
+    
+    try:
+        logs = await sector_api.get_logs()
+        temps = await sector_api.get_temperatures()
+        hums = await sector_api.get_humidity()
+        
+        return JSONResponse({
+            "logs": logs,
+            "temps": temps,
+            "hums": hums
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
 
 @app.post("/trigger_2fa")
 async def trigger_2fa():
