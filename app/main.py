@@ -205,6 +205,7 @@ class MqttHandler:
             # Subscribe to command topics
             client.subscribe(f"{base}/+/set")          # Alarm Panel commands
             client.subscribe(f"{base}/+/set_switch")   # Switch commands
+            client.subscribe(f"{base}/bridge/force_update") # Force update command
             
             # Publish Online Status
             client.publish(f"{base}/bridge/status", "online", retain=True)
@@ -218,6 +219,12 @@ class MqttHandler:
             payload = msg.payload.decode().upper()
             topic = msg.topic
             logger.debug(f"MQTT Command Received: {payload} on {topic}")
+            
+            if topic.endswith("/bridge/force_update"):
+                if payload == "UPDATE":
+                    logger.info("MQTT Command: Force Update")
+                    poll_wakeup.set()
+                return
             
             if cfg.data.get("panel_code") and sector_api:
                 mode = None
@@ -282,6 +289,18 @@ class MqttHandler:
             "device": dev
         }
         self.client.publish(f"{disc}/switch/sa_{p_id}_switch/config", json.dumps(p_switch), retain=True)
+
+        # 3. Force Update Button Entity
+        p_button = {
+            "name": "Sector Alarm Force Update",
+            "unique_id": f"sa_button_{p_id}_update",
+            "command_topic": f"{base}/bridge/force_update",
+            "availability_topic": f"{base}/bridge/status",
+            "payload_press": "UPDATE",
+            "icon": "mdi:update",
+            "device": dev
+        }
+        self.client.publish(f"{disc}/button/sa_{p_id}_update/config", json.dumps(p_button), retain=True)
 
     def publish_sensor(self, serial, name, type_, val):
         disc = cfg.data.get("discovery_prefix", "homeassistant")
