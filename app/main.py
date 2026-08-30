@@ -372,15 +372,16 @@ async def poll_sector():
                             l = c.get("Label", "Unknown")
                             v = c[key]
                             if not s: continue
-                            if s not in sensors: sensors[s] = {"name": l, "serial": s}
+                            if s not in sensors: sensors[s] = {"name": l, "serial": s, "raw": {}}
                             sensors[s][key.lower()] = v
+                            sensors[s]["raw"].update(c)
                             mqtt_handler.publish_sensor(s, l, "temp" if key=="Temperature" else "hum", v)
 
                 process_s(temps, "Temperature")
                 process_s(hums, "Humidity")
                 
                 latest_data["sensors"] = list(sensors.values())
-                latest_data["last_update"] = time.strftime("%H:%M:%S")
+                latest_data["last_update"] = int(time.time() * 1000)
             except Exception as e:
                 if str(e) == "RATE_LIMITED":
                     system_state = "RATE_LIMITED"

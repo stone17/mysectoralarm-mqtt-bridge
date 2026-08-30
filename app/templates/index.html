@@ -54,7 +54,7 @@
                         <h2 class="text-capitalize mb-0">{{ data.status }}</h2>
                     </div>
                     <div class="text-end">
-                        <small>Last Update: {{ data.last_update }}</small>
+                        <small>Last Update: <span id="last-update-time" data-ts="{{ data.last_update }}">{{ data.last_update }}</span></small>
                     </div>
                 </div>
             </div>
@@ -63,8 +63,9 @@
         {% for sensor in data.sensors %}
         <div class="col-md-4">
             <div class="card h-100 shadow-sm card-temp">
-                <div class="card-body text-center">
-                    <h5 class="card-title text-truncate">{{ sensor.name }}</h5>
+                <div class="card-body text-center position-relative">
+                    <button class="btn btn-sm btn-outline-info position-absolute top-0 end-0 m-2" onclick='showRawData({{ sensor.raw | tojson | safe }})'>!</button>
+                    <h5 class="card-title text-truncate mt-2">{{ sensor.name }}</h5>
                     <div class="row mt-3">
                         {% if 'temperature' in sensor and sensor.temperature is not none %}
                         <div class="col">
@@ -144,8 +145,44 @@
         </div>
     </div>
 
+    <div class="modal fade" id="rawModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Device Raw Data</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-dark text-light p-3" style="max-height: 60vh; overflow-y: auto;">
+                    <pre id="raw-json-viewer" style="color: #00ff00; font-family: monospace; font-size: 0.9em; margin: 0;"></pre>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
+        // Time Formatting
+        function formatTime(ts) {
+            if (!ts) return '';
+            const d = new Date(Number(ts));
+            if (isNaN(d)) return ts;
+            return d.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+        }
+        
+        const lastUpdateEl = document.getElementById('last-update-time');
+        if (lastUpdateEl && lastUpdateEl.dataset.ts) {
+            lastUpdateEl.innerText = formatTime(lastUpdateEl.dataset.ts);
+        }
+
+        // Raw Data Modal
+        function showRawData(data) {
+            document.getElementById('raw-json-viewer').textContent = JSON.stringify(data, null, 2);
+            new bootstrap.Modal(document.getElementById('rawModal')).show();
+        }
+
         // Auto-Refresh Logic
         let currentState = "{{ state }}";
         let lastUpdate = "{{ data.last_update if data else '' }}";
