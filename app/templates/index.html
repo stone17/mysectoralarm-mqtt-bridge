@@ -95,7 +95,8 @@
                         <h2 class="text-capitalize mb-0">{{ data.status }}</h2>
                     </div>
                     <div class="text-end">
-                        <small>Last Update: <span id="last-update-time" data-ts="{{ data.last_update }}">{{ data.last_update }}</span></small>
+                        <small>Last Update: <span id="last-update-time" data-ts="{{ data.last_update }}">{{ data.last_update }}</span></small><br>
+                        <small>Next Poll: <span class="next-retry-time" data-ts="{{ data.next_retry }}">{{ data.next_retry }}</span></small>
                     </div>
                 </div>
             </div>
