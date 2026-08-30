@@ -36,53 +36,61 @@ class SectorAlarmAPI:
             force (bool): If True, forces a request to the server even if token seems valid.
         Returns: "SUCCESS", "2FA_REQUIRED", or "FAILED"
         """
-        print(f"DEBUG: Starting Login for {self.email} (Force={force})...")
+        _LOGGER.info(f"Starting Login for {self.email} (Force={force})...")
         await self.ensure_session()
         
         # 1. Try Token Check First (Skip if forced)
         if not force and self.access_token:
-            print("DEBUG: Checking existing token before logging in...")
-            if await self.validate_token():
-                print("DEBUG: Existing token is valid. Skipping login.")
+            _LOGGER.debug("Checking existing token before logging in...")
+            val_res = await self.validate_token()
+            if val_res == "SUCCESS":
+                _LOGGER.info("Existing token is valid. Skipping login.")
+                return "SUCCESS"
+            elif val_res == "RATE_LIMITED":
+                _LOGGER.warning("Token check rate limited. Assuming token is still valid for now.")
                 return "SUCCESS"
             else:
-                print("DEBUG: Existing token is INVALID.")
+                _LOGGER.info("Existing token is INVALID.")
 
         # 2. Perform Login
         url = f"{API_URL}/api/Login/Login"
         payload = {"userId": self.email, "password": self.password}
         
         try:
-            print(f"DEBUG: POST {url}")
+            _LOGGER.debug(f"POST {url}")
             async with async_timeout.timeout(15):
                 async with self.session.post(url, json=payload) as response:
-                    print(f"DEBUG: Login Response Status: {response.status}")
+                    _LOGGER.debug(f"Login Response Status: {response.status}")
                     
                     if response.status == 200:
                         data = await response.json()
-                        print("DEBUG: Login 200 OK. Token received.")
+                        _LOGGER.info("Login 200 OK. Token received.")
                         self._update_headers(data.get("AuthorizationToken"))
                         return "SUCCESS"
                     
                     elif response.status == 204: 
-                        print("DEBUG: Login 204 No Content. 2FA Triggered (SMS should be sent).")
+                        _LOGGER.info("Login 204 No Content. 2FA Triggered (SMS should be sent).")
                         return "2FA_REQUIRED"
                     
                     elif response.status == 401:
-                        print("DEBUG: Login 401 Unauthorized. Password wrong or 2FA required.")
+                        _LOGGER.error("Login 401 Unauthorized. Password wrong or 2FA required.")
                         return "FAILED"
+                    
+                    elif response.status == 429:
+                        _LOGGER.warning("Login 429 Rate Limited.")
+                        return "RATE_LIMITED"
                     
                     else:
                         text = await response.text()
-                        print(f"DEBUG: Login Failed. Body: {text}")
+                        _LOGGER.error(f"Login Failed. Status: {response.status}, Body: {text}")
                         return "FAILED"
 
         except Exception as e:
-            print(f"DEBUG: Login Exception: {e}")
+            _LOGGER.error(f"Login Exception: {e}")
             return "FAILED"
 
     async def validate_2fa(self, code):
-        print(f"DEBUG: Submitting 2FA Code: {code}")
+        _LOGGER.info(f"Submitting 2FA Code: {code}")
         await self.ensure_session()
         
         url = f"{API_URL}/api/Login/ValidateTwoWayVerificationCode"
@@ -94,27 +102,29 @@ class SectorAlarmAPI:
 
         try:
             async with self.session.post(url, json=payload) as response:
-                print(f"DEBUG: Validate 2FA Status: {response.status}")
+                _LOGGER.debug(f"Validate 2FA Status: {response.status}")
                 if response.status == 200:
                     data = await response.json()
                     token = data.get("AuthorizationToken")
                     if token:
-                        print("DEBUG: 2FA Success! Token obtained.")
+                        _LOGGER.info("2FA Success! Token obtained.")
                         self._update_headers(token)
                         return True
                 else:
                     text = await response.text()
-                    print(f"DEBUG: 2FA Failed Body: {text}")
+                    _LOGGER.error(f"2FA Failed Body: {text}")
         except Exception as e:
-            print(f"DEBUG: 2FA Exception: {e}")
+            _LOGGER.error(f"2FA Exception: {e}")
         return False
 
     async def validate_token(self):
         try:
             res = await self.get_panel_status()
-            return res is not None
-        except:
-            return False
+            return "SUCCESS" if res is not None else "INVALID"
+        except Exception as e:
+            if str(e) == "RATE_LIMITED":
+                return "RATE_LIMITED"
+            return "INVALID"
 
     # --- Data Methods ---
     async def get_panel_status(self):
@@ -146,8 +156,13 @@ class SectorAlarmAPI:
         try:
             async with self.session.get(url, headers=self.headers) as resp:
                 if resp.status == 200: return await resp.json()
-                else: print(f"DEBUG: GET {url} failed: {resp.status}")
-        except Exception as e: print(f"DEBUG: GET Error {url}: {e}")
+                elif resp.status == 429:
+                    _LOGGER.warning(f"GET {url} failed: 429 Rate Limited")
+                    raise Exception("RATE_LIMITED")
+                else: _LOGGER.error(f"GET {url} failed: {resp.status}")
+        except Exception as e: 
+            if str(e) == "RATE_LIMITED": raise
+            _LOGGER.error(f"GET Error {url}: {e}")
         return None
 
     async def _post(self, url, payload):
@@ -157,8 +172,13 @@ class SectorAlarmAPI:
                 if resp.status in [200, 204]:
                     try: return await resp.json()
                     except: return True
-                else: print(f"DEBUG: POST {url} failed: {resp.status}")
-        except Exception as e: print(f"DEBUG: POST Error {url}: {e}")
+                elif resp.status == 429:
+                    _LOGGER.warning(f"POST {url} failed: 429 Rate Limited")
+                    raise Exception("RATE_LIMITED")
+                else: _LOGGER.error(f"POST {url} failed: {resp.status}")
+        except Exception as e: 
+            if str(e) == "RATE_LIMITED": raise
+            _LOGGER.error(f"POST Error {url}: {e}")
         return None
 
     async def close(self):

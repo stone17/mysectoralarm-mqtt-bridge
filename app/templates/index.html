@@ -14,10 +14,11 @@
     <div class="d-flex justify-content-between align-items-center mb-4">
         <h3>🛡️ Sector Alarm Bridge</h3>
         <div>
-            <span id="state-badge" class="badge bg-{{ 'success' if state == 'CONNECTED' else 'warning' if state == 'WAITING_2FA' else 'danger' }} p-2">
+            <span id="state-badge" class="badge bg-{{ 'success' if state == 'CONNECTED' else 'warning' if state in ['WAITING_2FA', 'RATE_LIMITED'] else 'danger' }} p-2">
                 {{ state }}
             </span>
             <button class="btn btn-outline-secondary ms-2" data-bs-toggle="modal" data-bs-target="#configModal">⚙️ Settings</button>
+            <button class="btn btn-outline-info ms-2" data-bs-toggle="modal" data-bs-target="#logsModal">📜 Logs</button>
         </div>
     </div>
 
@@ -125,11 +126,52 @@
         </div>
     </div>
 
+    <div class="modal fade" id="logsModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Live Logs</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-dark text-light p-3" style="max-height: 60vh; overflow-y: auto;">
+                    <pre id="log-viewer" style="color: #00ff00; font-family: monospace; font-size: 0.9em; margin: 0;">Loading logs...</pre>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-primary" onclick="fetchLogs()">Refresh</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // Auto-Refresh Logic
         let currentState = "{{ state }}";
         let lastUpdate = "{{ data.last_update if data else '' }}";
+        let logsInterval = null;
+        
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/logs?t=' + new Date().getTime());
+                if (!res.ok) return;
+                const data = await res.json();
+                if (data && data.logs) {
+                    const viewer = document.getElementById('log-viewer');
+                    viewer.textContent = data.logs.join('\n');
+                    viewer.scrollTop = viewer.scrollHeight;
+                }
+            } catch (e) { console.error("Logs error:", e); }
+        }
+
+        const logsModalEl = document.getElementById('logsModal');
+        logsModalEl.addEventListener('show.bs.modal', function () {
+            fetchLogs();
+            logsInterval = setInterval(fetchLogs, 3000);
+        });
+        logsModalEl.addEventListener('hide.bs.modal', function () {
+            if (logsInterval) clearInterval(logsInterval);
+        });
         
         setInterval(async () => {
             try {
@@ -143,10 +185,7 @@
                 if (!data || !data.state) return;
 
                 // Reload if state changes to meaningful values
-                if (currentState !== 'CONNECTED' && data.state === 'CONNECTED') {
-                    window.location.reload();
-                }
-                if (currentState !== 'WAITING_2FA' && data.state === 'WAITING_2FA') {
+                if (currentState !== data.state && ['CONNECTED', 'WAITING_2FA', 'RATE_LIMITED', 'ERROR'].includes(data.state)) {
                     window.location.reload();
                 }
                 

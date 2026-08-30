@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -16,8 +17,25 @@ from app import security
 
 # --- CONFIG & LOGGING ---
 CONFIG_FILE = os.getenv("CONFIG_PATH", "app/sector_config.yaml")
+
+class MemoryLogHandler(logging.Handler):
+    def __init__(self, capacity=500):
+        super().__init__()
+        self.logs = collections.deque(maxlen=capacity)
+
+    def emit(self, record):
+        self.logs.append(self.format(record))
+
+memory_handler = MemoryLogHandler()
+memory_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger("SectorBridge")
+logger.setLevel(logging.DEBUG)
+logger.addHandler(memory_handler)
+# Also attach to sector module logger to capture its output
+logging.getLogger("app.sector").addHandler(memory_handler)
+logging.getLogger("app.sector").setLevel(logging.DEBUG)
 
 # --- GLOBAL STATE ---
 sector_api: SectorAlarmAPI = None
@@ -102,7 +120,7 @@ class ConfigManager:
 
             with open(self.filepath, 'w') as f:
                 yaml.dump(storage_data, f, default_flow_style=False)
-            print(f"DEBUG: Config saved to {self.filepath}")
+            logger.debug(f"Config saved to {self.filepath}")
         except Exception as e:
             logger.error(f"Config Save Error: {e}")
 
@@ -119,7 +137,7 @@ class MqttHandler:
         try:
             broker = cfg.data.get('mqtt_broker')
             if broker:
-                print(f"DEBUG: MQTT Connecting to {broker}...")
+                logger.debug(f"MQTT Connecting to {broker}...")
                 
                 # Set Username/Password if configured
                 user = cfg.data.get('mqtt_username')
@@ -145,7 +163,7 @@ class MqttHandler:
 
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            print("DEBUG: MQTT Connected!")
+            logger.info("MQTT Connected!")
             base = cfg.data.get("mqtt_prefix", "sector")
             
             # Subscribe to command topics
@@ -157,13 +175,13 @@ class MqttHandler:
             
             self.publish_discovery()
         else:
-            print(f"DEBUG: MQTT Connect Failed code={rc}")
+            logger.error(f"MQTT Connect Failed code={rc}")
 
     def on_message(self, client, userdata, msg):
         try:
             payload = msg.payload.decode().upper()
             topic = msg.topic
-            print(f"DEBUG: MQTT Command Received: {payload} on {topic}")
+            logger.debug(f"MQTT Command Received: {payload} on {topic}")
             
             if cfg.data.get("panel_code") and sector_api:
                 mode = None
@@ -178,10 +196,10 @@ class MqttHandler:
                 elif payload == "OFF": mode = "Disarm"
                 
                 if mode:
-                    print(f"DEBUG: Executing Sector Action: {mode}")
+                    logger.info(f"Executing Sector Action: {mode}")
                     asyncio.run_coroutine_threadsafe(sector_api.arm_system(cfg.data["panel_code"], mode), loop)
         except Exception as e: 
-            print(f"DEBUG: MQTT Message Error: {e}")
+            logger.error(f"MQTT Message Error: {e}")
 
     def publish_discovery(self):
         p_id = str(cfg.data.get("panel_id", ""))
@@ -265,7 +283,7 @@ class MqttHandler:
         sw_state = "ON" if state in ["armed", "partialarmed"] else "OFF"
         self.client.publish(f"{base}/{p_id}/state_switch", sw_state, retain=True)
         
-        print(f"DEBUG: Published State: Panel={ha_state}, Switch={sw_state}")
+        logger.debug(f"Published State: Panel={ha_state}, Switch={sw_state}")
 
 mqtt_handler = MqttHandler()
 
@@ -284,8 +302,11 @@ async def poll_sector():
 
         # LOGIN CHECK
         if system_state != "WAITING_2FA":
-            if not sector_api.access_token or not await sector_api.validate_token():
-                print("DEBUG: Loop needs login...")
+            val_res = await sector_api.validate_token()
+            if val_res == "RATE_LIMITED":
+                system_state = "RATE_LIMITED"
+            elif not sector_api.access_token or val_res == "INVALID":
+                logger.info("Loop needs login...")
                 login_result = await sector_api.login(force=False)
                 
                 if login_result == "SUCCESS":
@@ -293,27 +314,23 @@ async def poll_sector():
                     cfg.data["token"] = sector_api.access_token
                     cfg.save()
                     mqtt_handler.publish_discovery()
+                elif login_result == "RATE_LIMITED":
+                    system_state = "RATE_LIMITED"
                 elif login_result == "2FA_REQUIRED":
                     system_state = "WAITING_2FA"
-                    print("DEBUG: Loop paused. Waiting for 2FA.")
+                    logger.warning("Loop paused. Waiting for 2FA.")
                 else:
                     system_state = "ERROR"
             else:
-                system_state = "CONNECTED"
+                if system_state == "RATE_LIMITED":
+                    system_state = "CONNECTED"
+                elif system_state != "CONNECTED":
+                    system_state = "CONNECTED"
         
         # FETCH DATA
         if system_state == "CONNECTED":
             try:
                 logs = await sector_api.get_logs()
-                
-                # --- DEBUG DUMP ---
-                try:
-                    config_dir = os.path.dirname(cfg.filepath)
-                    with open(os.path.join(config_dir, "debug_data.json"), "w") as f:
-                        json.dump({"logs": logs}, f)
-                except Exception as e:
-                    print(f"DEBUG Dump Error: {e}")
-                # ------------------
                 
                 if logs:
                     last = logs[0].get("EventType", "")
@@ -324,20 +341,14 @@ async def poll_sector():
                     mqtt_handler.publish_discovery() # Ensure discovery is fresh
                     mqtt_handler.publish_state(status)
             except Exception as e:
-                print(f"DEBUG: Logs Poll Exception: {e}")
+                if str(e) == "RATE_LIMITED":
+                    system_state = "RATE_LIMITED"
+                else:
+                    logger.error(f"Logs Poll Exception: {e}")
 
             try:
                 temps = await sector_api.get_temperatures() or {}
                 hums = await sector_api.get_humidity() or {}
-                
-                # --- DEBUG DUMP ---
-                try:
-                    config_dir = os.path.dirname(cfg.filepath)
-                    with open(os.path.join(config_dir, "debug_sensors.json"), "w") as f:
-                        json.dump({"temps": temps, "hums": hums}, f, indent=2)
-                except Exception as e:
-                    print(f"DEBUG Dump Error: {e}")
-                # ------------------
                 
                 sensors = {} 
                 def process_s(data, key):
@@ -371,10 +382,17 @@ async def poll_sector():
                 latest_data["sensors"] = list(sensors.values())
                 latest_data["last_update"] = time.strftime("%H:%M:%S")
             except Exception as e:
-                print(f"DEBUG: Sensors Poll Exception: {e}")
+                if str(e) == "RATE_LIMITED":
+                    system_state = "RATE_LIMITED"
+                else:
+                    logger.error(f"Sensors Poll Exception: {e}")
 
         interval = int(cfg.data.get("poll_interval", 60))
         sleep_time = interval if system_state == "CONNECTED" else 5
+        if system_state == "RATE_LIMITED":
+            logger.info(f"Rate limited by API, waiting {interval}s before next attempt.")
+            sleep_time = interval
+            
         await asyncio.sleep(sleep_time)
 
 # --- LIFECYCLE ---
@@ -406,6 +424,10 @@ async def home(request: Request):
 async def api_status():
     return JSONResponse({"state": system_state, "last_update": latest_data.get("last_update")})
 
+@app.get("/api/logs")
+async def api_logs():
+    return JSONResponse({"logs": list(memory_handler.logs)})
+
 @app.get("/api/debug_raw")
 async def api_debug_raw():
     global sector_api
@@ -428,6 +450,8 @@ async def api_debug_raw():
 @app.post("/trigger_2fa")
 async def trigger_2fa():
     global system_state, sector_api
+    logger.info("Manual 2FA Trigger Button Clicked.")
+    
     if not sector_api:
         sector_api = SectorAlarmAPI(
             cfg.data["email"], cfg.data["password"], 
@@ -435,18 +459,24 @@ async def trigger_2fa():
         )
 
     res = await sector_api.login(force=True)
+    logger.debug(f"Manual Trigger Result: {res}")
+    
     if res == "2FA_REQUIRED":
         system_state = "WAITING_2FA"
     elif res == "SUCCESS":
+        logger.info("Login succeeded immediately. Connecting...")
         system_state = "CONNECTED"
         cfg.data["token"] = sector_api.access_token
         cfg.save()
+    elif res == "RATE_LIMITED":
+        system_state = "RATE_LIMITED"
     
     return RedirectResponse("/", status_code=303)
 
 @app.post("/submit_2fa")
 async def submit_2fa(code: str = Form(...)):
     global system_state
+    logger.info(f"Submitting Code {code}")
     if sector_api:
         success = await sector_api.validate_2fa(code)
         if success:
@@ -473,6 +503,8 @@ async def save_config(
         "mqtt_username": mqtt_username, "mqtt_password": mqtt_password,
         "discovery_prefix": discovery_prefix, "poll_interval": int(poll_interval)
     })
+    
+    logger.info("Saving Config...")
     cfg.save()
     
     mqtt_handler.stop(); mqtt_handler.start()
