@@ -29,7 +29,7 @@
     <div class="alert alert-secondary py-2 shadow-sm d-flex justify-content-between align-items-center">
         <div>
             <strong>📊 API Polls:</strong> 
-            This Hour: <span class="badge bg-primary">{{ state_mgr.polls_hour | default(0) }}</span> | 
+            This Hour: <span class="badge bg-primary">{{ state_mgr.polls_hour | default(0) }} / {{ state_mgr.estimated_rate_limit | default('?') }}</span> | 
             This Day: <span class="badge bg-primary">{{ state_mgr.polls_day | default(0) }}</span>
         </div>
     </div>

@@ -29,7 +29,8 @@ class StateManager:
             "polls_hour": 0,
             "polls_day": 0,
             "current_hour": "",
-            "current_day": ""
+            "current_day": "",
+            "estimated_rate_limit": "?"
         }
         self.load()
 
@@ -495,6 +496,8 @@ async def poll_sector():
         interval = int(cfg.data.get("poll_interval", 60))
         sleep_time = interval if system_state == "CONNECTED" else 5
         if system_state == "RATE_LIMITED":
+            if state_mgr.data.get("polls_hour", 0) > 1:
+                state_mgr.data["estimated_rate_limit"] = state_mgr.data["polls_hour"]
             strategy = cfg.data.get("rate_limit_strategy", "wait_next_hour")
             if strategy == "wait_next_hour":
                 now = time.time()
