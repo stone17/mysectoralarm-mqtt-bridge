@@ -646,7 +646,24 @@ async def save_config(
 ):
     global sector_api, system_state
     
-    cfg.data["token"] = "" 
+    sector_changed = (
+        cfg.data.get("email") != email or 
+        cfg.data.get("password") != password or 
+        cfg.data.get("panel_id") != str(panel_id) or 
+        cfg.data.get("panel_code") != panel_code
+    )
+    
+    mqtt_changed = (
+        cfg.data.get("mqtt_broker") != mqtt_broker or
+        cfg.data.get("mqtt_port") != int(mqtt_port) or
+        cfg.data.get("mqtt_username") != mqtt_username or
+        cfg.data.get("mqtt_password") != mqtt_password or
+        cfg.data.get("discovery_prefix") != discovery_prefix
+    )
+    
+    if sector_changed:
+        cfg.data["token"] = "" 
+        
     cfg.data.update({
         "email": email, "password": password, "panel_id": str(panel_id), 
         "panel_code": panel_code, "mqtt_broker": mqtt_broker, "mqtt_port": int(mqtt_port),
@@ -658,9 +675,18 @@ async def save_config(
     logger.info("Saving Config...")
     cfg.save()
     
-    mqtt_handler.stop(); mqtt_handler.start()
-    if sector_api: await sector_api.close()
-    sector_api = None
-    system_state = "STARTING"
+    if mqtt_changed:
+        logger.info("MQTT settings changed, restarting MQTT client...")
+        mqtt_handler.stop()
+        mqtt_handler.start()
+        
+    if sector_changed:
+        logger.info("Sector Alarm credentials changed, resetting connection...")
+        if sector_api: await sector_api.close()
+        sector_api = None
+        system_state = "STARTING"
+        
+    # Always wake up the poll loop to apply potential interval/strategy changes immediately
+    poll_wakeup.set()
     
     return RedirectResponse(url="/", status_code=303)
