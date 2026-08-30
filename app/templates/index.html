@@ -22,6 +22,7 @@
             </form>
             <button class="btn btn-outline-secondary ms-2" data-bs-toggle="modal" data-bs-target="#configModal">⚙️ Settings</button>
             <button class="btn btn-outline-info ms-2" data-bs-toggle="modal" data-bs-target="#logsModal">📜 Logs</button>
+            <button class="btn btn-outline-dark ms-2" data-bs-toggle="modal" data-bs-target="#rawApiModal">🔍 Raw API</button>
         </div>
     </div>
 
@@ -94,21 +95,28 @@
 
         {% for sensor in data.sensors %}
         <div class="col-md-4">
-            <div class="card h-100 shadow-sm card-temp">
+            <div class="card h-100 shadow-sm {{ 'bg-danger text-white' if sensor.raw.LowBattery else 'card-temp' }}">
                 <div class="card-body text-center position-relative">
-                    <button class="btn btn-sm btn-outline-info position-absolute top-0 end-0 m-2" onclick='showRawData({{ sensor.raw | tojson | safe }})'>!</button>
-                    <h5 class="card-title text-truncate mt-2">{{ sensor.name }}</h5>
+                    <button class="btn btn-sm {{ 'btn-outline-light' if sensor.raw.LowBattery else 'btn-outline-info' }} position-absolute top-0 end-0 m-2" onclick='showRawData({{ sensor.raw | tojson | safe }})'>!</button>
+                    <h5 class="card-title text-truncate mt-2">
+                        {{ sensor.name }}
+                        {% if sensor.raw.LowBattery %}
+                        <span title="Low Battery">🔴🔋</span>
+                        {% else %}
+                        <span title="Battery OK">🟢🔋</span>
+                        {% endif %}
+                    </h5>
                     <div class="row mt-3">
                         {% if 'temperature' in sensor and sensor.temperature is not none %}
                         <div class="col">
-                            <h3 class="text-primary">{{ sensor.temperature }}°C</h3>
-                            <small class="text-muted">Temp</small>
+                            <h3 class="{{ 'text-white' if sensor.raw.LowBattery else 'text-primary' }}">{{ sensor.temperature }}°C</h3>
+                            <small class="{{ 'text-light' if sensor.raw.LowBattery else 'text-muted' }}">Temp</small>
                         </div>
                         {% endif %}
                         {% if 'humidity' in sensor and sensor.humidity is not none %}
                         <div class="col {% if 'temperature' in sensor and sensor.temperature is not none %}border-start{% endif %}">
-                            <h3 class="text-info">{{ sensor.humidity }}%</h3>
-                            <small class="text-muted">Hum</small>
+                            <h3 class="{{ 'text-white' if sensor.raw.LowBattery else 'text-info' }}">{{ sensor.humidity }}%</h3>
+                            <small class="{{ 'text-light' if sensor.raw.LowBattery else 'text-muted' }}">Hum</small>
                         </div>
                         {% endif %}
                     </div>
@@ -186,6 +194,23 @@
                 </div>
                 <div class="modal-body bg-dark text-light p-3" style="max-height: 60vh; overflow-y: auto;">
                     <pre id="raw-json-viewer" style="color: #00ff00; font-family: monospace; font-size: 0.9em; margin: 0;"></pre>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="rawApiModal" tabindex="-1">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Last Raw API Response</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body bg-dark text-light p-3" style="max-height: 60vh; overflow-y: auto;">
+                    <pre style="color: #00ff00; font-family: monospace; font-size: 0.9em; margin: 0;">{{ {'logs': data.raw_logs, 'temps': data.raw_temps, 'hums': data.raw_hums} | tojson(indent=2) }}</pre>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>

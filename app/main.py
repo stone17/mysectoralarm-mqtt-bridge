@@ -404,6 +404,7 @@ async def poll_sector():
                     status = "armed" if "armed" in last and "disarmed" not in last else "disarmed"
                     if "partial" in last: status = "partialarmed"
                     latest_data["status"] = status
+                    latest_data["raw_logs"] = logs
                     state_mgr.save()
                     
                     mqtt_handler.publish_discovery() # Ensure discovery is fresh
@@ -417,6 +418,9 @@ async def poll_sector():
             try:
                 temps = await sector_api.get_temperatures() or {}
                 hums = await sector_api.get_humidity() or {}
+                
+                latest_data["raw_temps"] = temps
+                latest_data["raw_hums"] = hums
                 
                 sensors = {} 
                 def process_s(data, key):
