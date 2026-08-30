@@ -16,7 +16,42 @@ from app.sector import SectorAlarmAPI
 from app import security
 
 # --- CONFIG & LOGGING ---
-CONFIG_FILE = os.getenv("CONFIG_PATH", "app/sector_config.yaml")
+CONFIG_FILE = os.getenv("CONFIG_PATH", "/config/sector_config.yaml")
+STATE_FILE = os.getenv("STATE_PATH", "/config/state.json")
+
+class StateManager:
+    def __init__(self, filepath):
+        self.filepath = filepath
+        self.data = {
+            "latest_data": {"status": "Unknown", "temps": [], "humidity": []},
+            "backoff_multiplier": 1,
+            "last_poll_try": 0
+        }
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.filepath):
+            try:
+                with open(self.filepath, 'r') as f:
+                    file_data = json.load(f)
+                    if "latest_data" in file_data:
+                        self.data["latest_data"] = file_data["latest_data"]
+                    if "backoff_multiplier" in file_data:
+                        self.data["backoff_multiplier"] = file_data["backoff_multiplier"]
+                    if "last_poll_try" in file_data:
+                        self.data["last_poll_try"] = file_data["last_poll_try"]
+            except Exception as e:
+                logger.error(f"State Load Error: {e}")
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
+            with open(self.filepath, 'w') as f:
+                json.dump(self.data, f)
+        except Exception as e:
+            logger.error(f"State Save Error: {e}")
+
+state_mgr = StateManager(STATE_FILE)
 
 class MemoryLogHandler(logging.Handler):
     def __init__(self, capacity=500):
@@ -39,9 +74,10 @@ logging.getLogger("app.sector").setLevel(logging.DEBUG)
 
 # --- GLOBAL STATE ---
 sector_api: SectorAlarmAPI = None
-latest_data = {"status": "Unknown", "temps": [], "humidity": []}
+latest_data = state_mgr.data["latest_data"]
 system_state = "STARTING"
 running = True
+poll_wakeup = asyncio.Event()
 
 class ConfigManager:
     def __init__(self, filepath):
@@ -290,13 +326,43 @@ mqtt_handler = MqttHandler()
 # --- BACKGROUND POLLING ---
 async def poll_sector():
     global sector_api, latest_data, system_state
-    backoff_multiplier = 1
+    first_run = True
     
     while running:
         if not cfg.data.get("email") or not cfg.data.get("panel_id"):
             system_state = "CONFIG_REQUIRED"
-            await asyncio.sleep(5)
+            try:
+                await asyncio.wait_for(poll_wakeup.wait(), timeout=5)
+                poll_wakeup.clear()
+            except asyncio.TimeoutError:
+                pass
             continue
+
+        interval = int(cfg.data.get("poll_interval", 60))
+        
+        if first_run:
+            first_run = False
+            current_multiplier = state_mgr.data.get("backoff_multiplier", 1)
+            if current_multiplier > 1:
+                last_try = state_mgr.data.get("last_poll_try", 0)
+                now = int(time.time() * 1000)
+                required_wait_ms = interval * current_multiplier * 1000
+                
+                if now - last_try < required_wait_ms:
+                    system_state = "RATE_LIMITED"
+                    remaining_s = (required_wait_ms - (now - last_try)) / 1000.0
+                    latest_data["next_retry"] = last_try + required_wait_ms
+                    logger.info(f"Resuming backoff from previous run. Waiting {remaining_s:.1f}s before next attempt (multiplier: {current_multiplier}).")
+                    
+                    try:
+                        await asyncio.wait_for(poll_wakeup.wait(), timeout=remaining_s)
+                        poll_wakeup.clear()
+                    except asyncio.TimeoutError:
+                        pass
+        
+        state_mgr.data["last_poll_try"] = int(time.time() * 1000)
+        state_mgr.save()
+        latest_data["next_retry"] = None
 
         if not sector_api:
             sector_api = SectorAlarmAPI(cfg.data["email"], cfg.data["password"], cfg.data["panel_id"], cfg.data.get("token"))
@@ -338,6 +404,7 @@ async def poll_sector():
                     status = "armed" if "armed" in last and "disarmed" not in last else "disarmed"
                     if "partial" in last: status = "partialarmed"
                     latest_data["status"] = status
+                    state_mgr.save()
                     
                     mqtt_handler.publish_discovery() # Ensure discovery is fresh
                     mqtt_handler.publish_state(status)
@@ -383,7 +450,8 @@ async def poll_sector():
                 
                 latest_data["sensors"] = list(sensors.values())
                 latest_data["last_update"] = int(time.time() * 1000)
-                backoff_multiplier = 1
+                state_mgr.data["backoff_multiplier"] = 1
+                state_mgr.save()
             except Exception as e:
                 if str(e) == "RATE_LIMITED":
                     system_state = "RATE_LIMITED"
@@ -393,11 +461,19 @@ async def poll_sector():
         interval = int(cfg.data.get("poll_interval", 60))
         sleep_time = interval if system_state == "CONNECTED" else 5
         if system_state == "RATE_LIMITED":
-            sleep_time = interval * backoff_multiplier
-            logger.info(f"Rate limited by API, waiting {sleep_time}s before next attempt (multiplier: {backoff_multiplier}).")
-            backoff_multiplier = min(backoff_multiplier * 2, 60)
+            current_multiplier = state_mgr.data.get("backoff_multiplier", 1)
+            sleep_time = interval * current_multiplier
+            logger.info(f"Rate limited by API, waiting {sleep_time}s before next attempt (multiplier: {current_multiplier}).")
+            state_mgr.data["backoff_multiplier"] = min(current_multiplier * 2, 60)
+            state_mgr.save()
             
-        await asyncio.sleep(sleep_time)
+        latest_data["next_retry"] = int(time.time() * 1000) + int(sleep_time * 1000)
+        
+        try:
+            await asyncio.wait_for(poll_wakeup.wait(), timeout=sleep_time)
+            poll_wakeup.clear()
+        except asyncio.TimeoutError:
+            pass
 
 # --- LIFECYCLE ---
 @asynccontextmanager
@@ -426,7 +502,11 @@ async def home(request: Request):
 
 @app.get("/api/status")
 async def api_status():
-    return JSONResponse({"state": system_state, "last_update": latest_data.get("last_update")})
+    return JSONResponse({
+        "state": system_state, 
+        "last_update": latest_data.get("last_update"),
+        "next_retry": latest_data.get("next_retry")
+    })
 
 @app.get("/api/logs")
 async def api_logs():
@@ -458,7 +538,22 @@ async def override_status(status: str = Form(...)):
         logger.info(f"Manual override of status to: {status}")
         latest_data["status"] = status
         latest_data["last_update"] = int(time.time() * 1000)
+        state_mgr.save()
         mqtt_handler.publish_state(status)
+    return RedirectResponse("/", status_code=303)
+
+@app.post("/force_update")
+async def force_update():
+    logger.info("Manual Force Update Triggered.")
+    poll_wakeup.set()
+    return RedirectResponse("/", status_code=303)
+
+@app.post("/reset_wait")
+async def reset_wait():
+    logger.info("Manual Reset Wait Triggered.")
+    state_mgr.data["backoff_multiplier"] = 1
+    state_mgr.save()
+    poll_wakeup.set()
     return RedirectResponse("/", status_code=303)
 
 @app.post("/trigger_2fa")

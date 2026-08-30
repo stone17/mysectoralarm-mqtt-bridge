@@ -17,6 +17,9 @@
             <span id="state-badge" class="badge bg-{{ 'success' if state == 'CONNECTED' else 'warning' if state in ['WAITING_2FA', 'RATE_LIMITED'] else 'danger' }} p-2">
                 {{ state }}
             </span>
+            <form action="/force_update" method="post" class="d-inline">
+                <button type="submit" class="btn btn-outline-primary ms-2">🔄 Force Update</button>
+            </form>
             <button class="btn btn-outline-secondary ms-2" data-bs-toggle="modal" data-bs-target="#configModal">⚙️ Settings</button>
             <button class="btn btn-outline-info ms-2" data-bs-toggle="modal" data-bs-target="#logsModal">📜 Logs</button>
         </div>
@@ -60,8 +63,18 @@
     <div class="row g-4 mt-2">
         {% if state != 'CONNECTED' %}
         <div class="col-md-12">
-            <div class="alert alert-warning py-2 mb-0 shadow-sm">
-                <strong>⚠️ Note:</strong> The bridge is currently not connected ({{ state }}). Showing last known data.
+            <div class="alert alert-warning py-2 mb-0 shadow-sm d-flex justify-content-between align-items-center">
+                <div>
+                    <strong>⚠️ Note:</strong> The bridge is currently not connected ({{ state }}). Showing last known data.
+                    {% if data.next_retry %}
+                    <br><small>Next retry: <span class="next-retry-time" data-ts="{{ data.next_retry }}">{{ data.next_retry }}</span></small>
+                    {% endif %}
+                </div>
+                {% if state == 'RATE_LIMITED' %}
+                <form action="/reset_wait" method="post">
+                    <button type="submit" class="btn btn-sm btn-warning fw-bold">Reset Wait Time</button>
+                </form>
+                {% endif %}
             </div>
         </div>
         {% endif %}
@@ -196,6 +209,11 @@
             lastUpdateEl.innerText = formatTime(lastUpdateEl.dataset.ts);
         }
 
+        const nextRetryEls = document.querySelectorAll('.next-retry-time');
+        nextRetryEls.forEach(el => {
+            if (el.dataset.ts) el.innerText = formatTime(el.dataset.ts);
+        });
+
         // Raw Data Modal
         function showRawData(data) {
             document.getElementById('raw-json-viewer').textContent = JSON.stringify(data, null, 2);
@@ -205,6 +223,7 @@
         // Auto-Refresh Logic
         let currentState = "{{ state }}";
         let lastUpdate = "{{ data.last_update if data else '' }}";
+        let nextRetry = "{{ data.next_retry if data else '' }}";
         let logsInterval = null;
         
         async function fetchLogs() {
@@ -248,11 +267,16 @@
                 if (data.last_update && String(lastUpdate) !== String(data.last_update)) {
                     window.location.reload();
                 }
+                
+                if (data.next_retry && String(nextRetry) !== String(data.next_retry)) {
+                    window.location.reload();
+                }
 
                 currentState = data.state;
                 if (data.last_update) {
                     lastUpdate = String(data.last_update);
                 }
+                nextRetry = data.next_retry ? String(data.next_retry) : "";
                 
                 // Update badge text
                 const badge = document.getElementById('state-badge');
