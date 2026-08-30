@@ -56,8 +56,15 @@
     </div>
     {% endif %}
 
-    {% if state == 'CONNECTED' or data.status != 'Unknown' %}
+    {% if state == 'CONNECTED' or data.status != 'Unknown' or data.sensors %}
     <div class="row g-4 mt-2">
+        {% if state != 'CONNECTED' %}
+        <div class="col-md-12">
+            <div class="alert alert-warning py-2 mb-0 shadow-sm">
+                <strong>⚠️ Note:</strong> The bridge is currently not connected ({{ state }}). Showing last known data.
+            </div>
+        </div>
+        {% endif %}
         <div class="col-md-12">
             <div class="card shadow-sm {{ 'card-err' if data.status == 'armed' else 'card-ok' }}">
                 <div class="card-body d-flex justify-content-between">
@@ -238,13 +245,13 @@
                     window.location.reload();
                 }
                 
-                if (data.last_update && lastUpdate !== data.last_update) {
+                if (data.last_update && String(lastUpdate) !== String(data.last_update)) {
                     window.location.reload();
                 }
 
                 currentState = data.state;
                 if (data.last_update) {
-                    lastUpdate = data.last_update;
+                    lastUpdate = String(data.last_update);
                 }
                 
                 // Update badge text
