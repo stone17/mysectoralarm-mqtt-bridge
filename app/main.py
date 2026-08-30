@@ -25,7 +25,11 @@ class StateManager:
         self.data = {
             "latest_data": {"status": "Unknown", "temps": [], "humidity": []},
             "backoff_multiplier": 1,
-            "last_poll_try": 0
+            "last_poll_try": 0,
+            "polls_hour": 0,
+            "polls_day": 0,
+            "current_hour": "",
+            "current_day": ""
         }
         self.load()
 
@@ -34,12 +38,9 @@ class StateManager:
             try:
                 with open(self.filepath, 'r') as f:
                     file_data = json.load(f)
-                    if "latest_data" in file_data:
-                        self.data["latest_data"] = file_data["latest_data"]
-                    if "backoff_multiplier" in file_data:
-                        self.data["backoff_multiplier"] = file_data["backoff_multiplier"]
-                    if "last_poll_try" in file_data:
-                        self.data["last_poll_try"] = file_data["last_poll_try"]
+                    for key in self.data.keys():
+                        if key in file_data:
+                            self.data[key] = file_data[key]
             except Exception as e:
                 logger.error(f"State Load Error: {e}")
 
@@ -90,6 +91,7 @@ class ConfigManager:
             "mqtt_prefix": "sector",
             "discovery_prefix": "homeassistant",
             "poll_interval": 60,
+            "rate_limit_strategy": "wait_next_hour",
             "email": "",
             "password": "",
             "panel_id": "",
@@ -361,23 +363,32 @@ async def poll_sector():
         
         if first_run:
             first_run = False
-            current_multiplier = state_mgr.data.get("backoff_multiplier", 1)
-            if current_multiplier > 1:
-                last_try = state_mgr.data.get("last_poll_try", 0)
-                now = int(time.time() * 1000)
-                required_wait_ms = interval * current_multiplier * 1000
-                
-                if now - last_try < required_wait_ms:
-                    system_state = "RATE_LIMITED"
-                    remaining_s = (required_wait_ms - (now - last_try)) / 1000.0
-                    latest_data["next_retry"] = last_try + required_wait_ms
-                    logger.info(f"Resuming backoff from previous run. Waiting {remaining_s:.1f}s before next attempt (multiplier: {current_multiplier}).")
-                    
-                    try:
-                        await asyncio.wait_for(poll_wakeup.wait(), timeout=remaining_s)
-                        poll_wakeup.clear()
-                    except asyncio.TimeoutError:
-                        pass
+            now = int(time.time() * 1000)
+            next_retry_ms = latest_data.get("next_retry")
+            if next_retry_ms and next_retry_ms > now:
+                system_state = "RATE_LIMITED"
+                remaining_s = (next_retry_ms - now) / 1000.0
+                logger.info(f"Resuming wait from previous run. Waiting {remaining_s:.1f}s.")
+                try:
+                    await asyncio.wait_for(poll_wakeup.wait(), timeout=remaining_s)
+                    poll_wakeup.clear()
+                except asyncio.TimeoutError:
+                    pass
+        
+        import datetime
+        now_dt = datetime.datetime.now()
+        current_hour_str = now_dt.strftime("%Y-%m-%d %H")
+        current_day_str = now_dt.strftime("%Y-%m-%d")
+        
+        if state_mgr.data.get("current_hour") != current_hour_str:
+            state_mgr.data["current_hour"] = current_hour_str
+            state_mgr.data["polls_hour"] = 0
+        if state_mgr.data.get("current_day") != current_day_str:
+            state_mgr.data["current_day"] = current_day_str
+            state_mgr.data["polls_day"] = 0
+            
+        state_mgr.data["polls_hour"] = state_mgr.data.get("polls_hour", 0) + 1
+        state_mgr.data["polls_day"] = state_mgr.data.get("polls_day", 0) + 1
         
         state_mgr.data["last_poll_try"] = int(time.time() * 1000)
         state_mgr.save()
@@ -484,10 +495,16 @@ async def poll_sector():
         interval = int(cfg.data.get("poll_interval", 60))
         sleep_time = interval if system_state == "CONNECTED" else 5
         if system_state == "RATE_LIMITED":
-            current_multiplier = state_mgr.data.get("backoff_multiplier", 1)
-            sleep_time = interval * current_multiplier
-            logger.info(f"Rate limited by API, waiting {sleep_time}s before next attempt (multiplier: {current_multiplier}).")
-            state_mgr.data["backoff_multiplier"] = min(current_multiplier * 2, 60)
+            strategy = cfg.data.get("rate_limit_strategy", "wait_next_hour")
+            if strategy == "wait_next_hour":
+                now = time.time()
+                sleep_time = 3600 - (now % 3600) + 60
+                logger.info(f"Rate limited by API, waiting until next hour ({sleep_time:.0f}s).")
+            else:
+                current_multiplier = state_mgr.data.get("backoff_multiplier", 1)
+                sleep_time = interval * current_multiplier
+                logger.info(f"Rate limited by API, waiting {sleep_time}s before next attempt (multiplier: {current_multiplier}).")
+                state_mgr.data["backoff_multiplier"] = min(current_multiplier * 2, 60)
             state_mgr.save()
             
         latest_data["next_retry"] = int(time.time() * 1000) + int(sleep_time * 1000)
@@ -513,13 +530,13 @@ app = FastAPI(lifespan=lifespan)
 templates = Jinja2Templates(directory="app/templates")
 
 # --- ROUTES ---
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def home(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
         context={
-            "request": request, "config": cfg.data, "data": latest_data, "state": system_state
+            "request": request, "config": cfg.data, "data": latest_data, "state": system_state, "state_mgr": state_mgr.data
         }
     )
 
@@ -624,7 +641,8 @@ async def save_config(
     panel_id: str = Form(...), panel_code: str = Form(""),
     mqtt_broker: str = Form(...), mqtt_port: int = Form(...),
     mqtt_username: str = Form(""), mqtt_password: str = Form(""),
-    discovery_prefix: str = Form(...), poll_interval: int = Form(...)
+    discovery_prefix: str = Form(...), poll_interval: int = Form(...),
+    rate_limit_strategy: str = Form("wait_next_hour")
 ):
     global sector_api, system_state
     
@@ -633,7 +651,8 @@ async def save_config(
         "email": email, "password": password, "panel_id": str(panel_id), 
         "panel_code": panel_code, "mqtt_broker": mqtt_broker, "mqtt_port": int(mqtt_port),
         "mqtt_username": mqtt_username, "mqtt_password": mqtt_password,
-        "discovery_prefix": discovery_prefix, "poll_interval": int(poll_interval)
+        "discovery_prefix": discovery_prefix, "poll_interval": int(poll_interval),
+        "rate_limit_strategy": rate_limit_strategy
     })
     
     logger.info("Saving Config...")
