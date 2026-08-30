@@ -290,6 +290,7 @@ mqtt_handler = MqttHandler()
 # --- BACKGROUND POLLING ---
 async def poll_sector():
     global sector_api, latest_data, system_state
+    backoff_multiplier = 1
     
     while running:
         if not cfg.data.get("email") or not cfg.data.get("panel_id"):
@@ -382,6 +383,7 @@ async def poll_sector():
                 
                 latest_data["sensors"] = list(sensors.values())
                 latest_data["last_update"] = int(time.time() * 1000)
+                backoff_multiplier = 1
             except Exception as e:
                 if str(e) == "RATE_LIMITED":
                     system_state = "RATE_LIMITED"
@@ -391,8 +393,9 @@ async def poll_sector():
         interval = int(cfg.data.get("poll_interval", 60))
         sleep_time = interval if system_state == "CONNECTED" else 5
         if system_state == "RATE_LIMITED":
-            logger.info(f"Rate limited by API, waiting {interval}s before next attempt.")
-            sleep_time = interval
+            sleep_time = interval * backoff_multiplier
+            logger.info(f"Rate limited by API, waiting {sleep_time}s before next attempt (multiplier: {backoff_multiplier}).")
+            backoff_multiplier = min(backoff_multiplier * 2, 60)
             
         await asyncio.sleep(sleep_time)
 
@@ -447,6 +450,16 @@ async def api_debug_raw():
         })
     except Exception as e:
         return JSONResponse({"error": str(e)})
+
+@app.post("/override_status")
+async def override_status(status: str = Form(...)):
+    global latest_data
+    if status in ["armed", "partialarmed", "disarmed"]:
+        logger.info(f"Manual override of status to: {status}")
+        latest_data["status"] = status
+        latest_data["last_update"] = int(time.time() * 1000)
+        mqtt_handler.publish_state(status)
+    return RedirectResponse("/", status_code=303)
 
 @app.post("/trigger_2fa")
 async def trigger_2fa():

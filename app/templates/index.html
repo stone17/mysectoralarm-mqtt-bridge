@@ -44,6 +44,18 @@
     </div>
     {% endif %}
 
+    {% if state != 'CONNECTED' %}
+    <div class="alert alert-info shadow-sm mt-3">
+        <h5 class="alert-heading">Manual Override</h5>
+        <p class="mb-2">If the bridge is rate-limited or offline, you can manually force the alarm state to update MQTT (and your home automation).</p>
+        <form action="/override_status" method="post" class="d-flex gap-2">
+            <button type="submit" name="status" value="disarmed" class="btn btn-success">Force Disarm</button>
+            <button type="submit" name="status" value="partialarmed" class="btn btn-warning">Force Arm (Home)</button>
+            <button type="submit" name="status" value="armed" class="btn btn-danger">Force Arm (Away)</button>
+        </form>
+    </div>
+    {% endif %}
+
     {% if state == 'CONNECTED' or data.status != 'Unknown' %}
     <div class="row g-4 mt-2">
         <div class="col-md-12">

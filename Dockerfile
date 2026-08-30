@@ -1,5 +1,9 @@
 FROM python:3.10-slim
 
+# Install tzdata for timezone support
+RUN apt-get update && apt-get install -y tzdata && rm -rf /var/lib/apt/lists/*
+ENV TZ=Europe/Stockholm
+
 WORKDIR /app
 
 COPY requirements.txt .
