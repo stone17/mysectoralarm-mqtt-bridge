@@ -9,12 +9,15 @@ It features a **Web Dashboard** for configuration, status monitoring, and handli
 ## ✨ Features
 
 * **Real-time Status**: Polls alarm state, temperature, and humidity sensors.
-* **MQTT Auto-Discovery**: Automatically creates devices in Home Assistant.
-* **Web UI**: clean interface to view sensors and configure settings.
+* **MQTT Auto-Discovery**: Automatically creates devices in Home Assistant, including a "Force Update" button.
+* **Advanced Web UI**: Clean interface to view sensors, configure settings, inspect **Live Logs**, and view **Raw API Data**.
+* **Resilient Rate Limiting**: Automatically handles API rate limits using exponential backoff, persisting state across Docker restarts to prevent infinite login loops.
+* **Manual Overrides**: Force update the alarm state manually via the Web UI if the bridge is rate-limited or offline.
+* **Visual Battery Indicators**: Easily spot low battery warnings on your sensors directly in the dashboard.
 * **2FA Support**: 
     * Handles SMS verification directly via the Web UI.
     * Supports manual token bypass for complex login scenarios.
-* **Dockerized**: Easy to deploy with Docker Compose.
+* **Dockerized**: Easy to deploy with Docker Compose (now with correct timezone support).
 
 ## 🚀 Quick Start
 
@@ -75,6 +78,8 @@ If you want to use this with other systems (Domoticz, OpenHAB, Node-RED), here a
 | `sector/<panel_id>/state` | `armed_away`, `armed_home`, `disarmed` | Current alarm state |
 | `sector/<panel_id>/set` | `ARM_AWAY`, `ARM_HOME`, `DISARM` | Command to change state |
 | `sector/sensor/<serial>/state` | `{"temperature": 21.5}` | Sensor data |
+| `sector/bridge/force_update` | `UPDATE` | Command to force an immediate poll |
+| `sector/bridge/status` | `online`, `offline` | Bridge availability |
 
 ## 🛠️ Development
 To run locally without Docker:

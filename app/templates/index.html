@@ -218,7 +218,7 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body bg-dark text-light p-3" style="max-height: 60vh; overflow-y: auto;">
-                    <pre style="color: #00ff00; font-family: monospace; font-size: 0.9em; margin: 0;">{{ {'logs': data.raw_logs, 'temps': data.raw_temps, 'hums': data.raw_hums} | tojson(indent=2) }}</pre>
+                    <pre style="color: #00ff00; font-family: monospace; font-size: 0.9em; margin: 0;">{{ {'logs': data.get('raw_logs'), 'temps': data.get('raw_temps'), 'hums': data.get('raw_hums')} | tojson(indent=2) }}</pre>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
